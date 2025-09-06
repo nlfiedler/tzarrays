@@ -1,0 +1,21 @@
+[package]
+name = "tzarrays"
+version = "0.1.0"
+edition = "2024"
+authors = ["Nathan Fiedler <nathanfiedler@fastmail.fm>"]
+description = "Optimal resizable Arrays"
+repository = "https://github.com/nlfiedler/tzarrays"
+readme = "README.md"
+keywords = [
+    "collections",
+    "dynamic-arrays",
+    "extensible-arrays",
+    "resizable-arrays",
+    "data-structures",
+]
+categories = ["data-structures"]
+license = "MIT"
+exclude = ["TODO.org", "test/*"]
+
+[dev-dependencies]
+ulid = "1.2.1"

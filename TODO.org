@@ -1,0 +1,52 @@
+* Task
+** DONE write a leak test for the cyclic array
+** TODO try implementing =get()= without using =pow()=
+*** section 6.3 has an O(1) solution
+*** computing a power is slow
+** analysis of the 2023 paper
+*** they index the B, B^2, B^3, ... index blocks (A) starting from 1
+*** they index the elements in the (data) blocks starting from 0
+*** for ~convenience~ they leave cell =A[0]= empty (not shown in Figure 4)
+*** section 5
+**** k ∈ [r−1]
+**** N = 10^6, r = 3
+|     B | k |     4B |
+|-------+---+--------|
+|   100 | 1 |    400 |
+| 10000 | 2 | 160000 |
+**** N = 10^6, r = 4
+|     B | k |      4B |
+|-------+---+---------|
+|    31 | 1 |     124 |
+|   961 | 2 |   15376 |
+| 29791 | 3 | 1906624 |
+**** N = 2^32, r = 3
+|       B | k |       4B |
+|---------+---+----------|
+|    1625 | 1 |     6500 |
+| 2640625 | 2 | 42250000 |
+**** N = 2^32, r = 4
+|        B | k |       4B |
+|----------+---+----------|
+|      256 | 1 |     1024 |
+|    65536 | 2 |   262144 |
+| 16777216 | 3 | 67108864 |
+*** how to determine B when N is changing?
+**** from Section 6 page 9
+: When N = B^r, the value of B is doubled and the whole data structure is rebuilt.
+**** for N = 1,000,000, B^r = 31^4 = 923,521
+*** notes on Figure 4
+- n.0 is the number of items in the last block of size B (the only block that can be empty or partially filled)
+- n.1 is the size of the index of the size B blocks
+- n.2 is the size of the index of the size B^2 blocks
+- and so on up to n.r-1 which is the size of the index of blocks of size B^(r-1)
+- larger blocks are always full
+- only the last B-sized block may be not full
+*** notation used in the paper
+- N.k is the number of elements in blocks before level k where 0 <= k < r
+- n.k is the number of blocks at level k (0 <= k < r)
+*** optimizations for locate operation (section 6.3)
+**** require B to be a power of 2; B = 2^b
+**** n.1 is the number of B sized blocks that are full
+**** n.0 then accounts for the partial/empty B block
+**** they conclude that naive search for index i is good enough rather than complicated O(1) approach
