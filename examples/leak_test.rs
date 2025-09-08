@@ -41,6 +41,9 @@ fn test_cyclic_array() {
     drop(sut);
 }
 
+// TODO: optimal array: fill then drop
+// TODO: optimal array: fill, pop all, then drop
+
 //
 // Create and drop collections and iterators in order to test for memory leaks.
 // Must allocate Strings in order to fully test the drop implementation.

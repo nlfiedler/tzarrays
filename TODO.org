@@ -1,8 +1,16 @@
 * Task
 ** DONE write a leak test for the cyclic array
+** DONE add tests with =String= items
+** DONE add tests with r=2
+** DONE implement =Drop=
+** DONE add ~clear_and_reuse~ tests for Drop
+** DONE add ~push_get_many~ tests for Drop
+** TODO implement =IntoIterator=
+** DONE remove the =allow= directives
 ** TODO try implementing =get()= without using =pow()=
 *** section 6.3 has an O(1) solution
 *** computing a power is slow
+** TODO try delaying the deallocation of the last empty block (see page 11)
 ** analysis of the 2023 paper
 *** they index the B, B^2, B^3, ... index blocks (A) starting from 1
 *** they index the elements in the (data) blocks starting from 0
