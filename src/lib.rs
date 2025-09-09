@@ -14,12 +14,13 @@
 //! described in the paper. As elements are added the array will grow by
 //! allocating additional data blocks. Likewise, as elements are removed from
 //! the end of the array, data blocks will be deallocated as they become empty.
+//! At most one empty data block will be retained as an optimization.
 //!
 //! # Performance
 //!
 //! The performance and memory usage of this data structure is complicated,
 //! please refer to the original paper for details.
-//! 
+//!
 //! # Safety
 //!
 //! Because this data structure is allocating memory, copying bytes using raw
@@ -68,6 +69,9 @@ pub struct OptimalArray<T> {
     /// A in the paper, pointers to the index blocks for i ∈ [r - 1]; first slot
     /// is left unused for convenience (see page 9 of the paper)
     big_a: Vec<CyclicArray<*mut T>>,
+    /// number of empty B blocks, either 0 or 1; avoids deallocating a block and
+    /// then allocating another one of the same size for a pop followed by push
+    empty: usize,
 }
 
 impl<T> OptimalArray<T> {
@@ -115,6 +119,7 @@ impl<T> OptimalArray<T> {
             lower_limit: 0,
             little_n,
             big_a,
+            empty: 0,
         }
     }
 
@@ -221,6 +226,7 @@ impl<T> OptimalArray<T> {
         }
         self.little_n = little_n;
         self.big_a = big_a;
+        self.empty = 0;
     }
 
     /// Combine small blocks into larger blocks.
@@ -345,17 +351,21 @@ impl<T> OptimalArray<T> {
             // next condition to ensure we allocate another B block
         }
         if self.little_n[1] == 0 || self.little_n[0] == one_b {
-            // A[1][n1] ← Allocate(B)
-            let layout = Layout::array::<T>(one_b).expect("unexpected overflow");
-            unsafe {
-                let ptr = alloc(layout).cast::<T>();
-                if ptr.is_null() {
-                    handle_alloc_error(layout);
+            if self.empty == 0 {
+                // A[1][n1] ← Allocate(B)
+                let layout = Layout::array::<T>(one_b).expect("unexpected overflow");
+                unsafe {
+                    let ptr = alloc(layout).cast::<T>();
+                    if ptr.is_null() {
+                        handle_alloc_error(layout);
+                    }
+                    self.big_a[1].push_back(ptr);
                 }
-                self.big_a[1].push_back(ptr);
+                // n1 ← n1 + 1
+                self.little_n[1] += 1;
+            } else {
+                self.empty = 0;
             }
-            // n1 ← n1 + 1
-            self.little_n[1] += 1;
             // n0 ← 0
             self.little_n[0] = 0;
         }
@@ -401,13 +411,19 @@ impl<T> OptimalArray<T> {
         self.big_n -= 1;
 
         if self.little_n[0] == 0 {
-            // Deallocate(A[1][n1-1])
-            let ptr = self.big_a[1].pop_back().unwrap();
             let one_b: usize = 1 << self.little_b;
-            let layout = Layout::array::<T>(one_b).expect("unexpected overflow");
-            unsafe { dealloc(ptr as *mut u8, layout) }
-            // n1 ← n1 - 1
-            self.little_n[1] -= 1;
+            // if there is another empty data block, deallocate it
+            if self.empty == 1 {
+                // Deallocate(A[1][n1-1])
+                let ptr = self.big_a[1].pop_back().unwrap();
+                let layout = Layout::array::<T>(one_b).expect("unexpected overflow");
+                unsafe { dealloc(ptr as *mut u8, layout) }
+                // n1 ← n1 - 1
+                self.little_n[1] -= 1;
+            }
+            // leave this last empty data block in case more pushes occur and we
+            // would soon be allocating the same sized block again
+            self.empty = 1;
             // n0 ← B -- another mistake in the paper?
             if self.little_n[1] > 0 {
                 self.little_n[0] = one_b;
@@ -638,6 +654,7 @@ impl<T> OptimalArray<T> {
 
             // zero out everything to the initial state
             self.big_n = 0;
+            self.empty = 0;
             self.little_b = 2;
             self.upper_limit = 1 << (2 * self.r);
             self.lower_limit = 0;
@@ -660,8 +677,8 @@ impl<T> fmt::Display for OptimalArray<T> {
         let counts: String = vc.join(",");
         write!(
             f,
-            "OptimalArray(n: {}, l: {}, h: {}, b: {}, r: {}, n: {counts})",
-            self.big_n, self.lower_limit, self.upper_limit, self.little_b, self.r
+            "OptimalArray(n: {}, l: {}, h: {}, e: {}, b: {}, r: {}, n: {counts})",
+            self.big_n, self.lower_limit, self.upper_limit, self.empty, self.little_b, self.r
         )
     }
 }
@@ -1287,7 +1304,34 @@ mod tests {
     }
 
     #[test]
-    fn test_pop_if() {
+    fn test_optimal_array_grow_shrink_empty_block() {
+        // test the empty block reuse logic for shrink and grow
+        //
+        // default B is 4, so push 12, then pop 4, then push 8 more, then ensure
+        // all values are present
+        let mut sut: OptimalArray<usize> = OptimalArray::new();
+        for value in 0..12 {
+            sut.push(value);
+        }
+        assert_eq!(sut.len(), 12);
+        for _ in 0..4 {
+            sut.pop();
+        }
+        assert_eq!(sut.len(), 8);
+        for value in 8..16 {
+            sut.push(value);
+        }
+        assert_eq!(sut.len(), 16);
+        for (idx, elem) in sut.iter().enumerate() {
+            assert_eq!(idx, *elem);
+        }
+
+        // try to trigger any clear/drop logic
+        sut.clear();
+    }
+
+    #[test]
+    fn test_optimal_array_pop_if() {
         let mut sut: OptimalArray<u32> = OptimalArray::new();
         assert!(sut.pop_if(|_| panic!("should not be called")).is_none());
         for value in 0..10 {
@@ -1300,7 +1344,7 @@ mod tests {
     }
 
     #[test]
-    fn test_swap_remove_single_block() {
+    fn test_optimal_array_swap_remove_single_block() {
         let mut sut: OptimalArray<u32> = OptimalArray::new();
         sut.push(1);
         assert_eq!(sut.len(), 1);
@@ -1310,7 +1354,7 @@ mod tests {
     }
 
     #[test]
-    fn test_swap_remove_multiple_blocks() {
+    fn test_optimal_array_swap_remove_multiple_blocks() {
         let mut sut: OptimalArray<u32> = OptimalArray::new();
         for value in 0..1024 {
             sut.push(value);
@@ -1324,14 +1368,14 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "swap_remove index (is 0) should be < len (is 0)")]
-    fn test_swap_remove_panic_empty() {
+    fn test_optimal_array_swap_remove_panic_empty() {
         let mut sut: OptimalArray<u32> = OptimalArray::new();
         sut.swap_remove(0);
     }
 
     #[test]
     #[should_panic(expected = "swap_remove index (is 1) should be < len (is 1)")]
-    fn test_swap_remove_panic_range_edge() {
+    fn test_optimal_array_swap_remove_panic_range_edge() {
         let mut sut: OptimalArray<u32> = OptimalArray::new();
         sut.push(1);
         sut.swap_remove(1);
@@ -1339,14 +1383,14 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "swap_remove index (is 2) should be < len (is 1)")]
-    fn test_swap_remove_panic_range_exceed() {
+    fn test_optimal_array_swap_remove_panic_range_exceed() {
         let mut sut: OptimalArray<u32> = OptimalArray::new();
         sut.push(1);
         sut.swap_remove(2);
     }
 
     #[test]
-    fn test_array_from_iterator() {
+    fn test_optimal_array_from_iterator() {
         let mut inputs: Vec<i32> = Vec::new();
         for value in 0..10_000 {
             inputs.push(value);
@@ -1412,7 +1456,7 @@ mod tests {
     }
 
     #[test]
-    fn test_push_get_many_instances_ints() {
+    fn test_optimal_array_push_get_many_instances_ints() {
         // test allocating, filling, and then dropping many instances
         for _ in 0..1_000 {
             let mut sut: OptimalArray<usize> = OptimalArray::new();
@@ -1424,7 +1468,7 @@ mod tests {
     }
 
     #[test]
-    fn test_push_get_many_instances_strings() {
+    fn test_optimal_array_push_get_many_instances_strings() {
         // test allocating, filling, and then dropping many instances
         for _ in 0..1_000 {
             let mut sut: OptimalArray<String> = OptimalArray::new();
@@ -1437,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn test_array_into_iterator_ints_done() {
+    fn test_optimal_array_into_iterator_ints_done() {
         let mut sut: OptimalArray<usize> = OptimalArray::new();
         for value in 0..1024 {
             sut.push(value);
@@ -1449,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn test_array_into_iterator_drop_tiny_done() {
+    fn test_optimal_array_into_iterator_drop_tiny_done() {
         // an array that only requires a single block
         let inputs = ["one", "two"];
         let mut sut: OptimalArray<String> = OptimalArray::new();
@@ -1463,7 +1507,7 @@ mod tests {
     }
 
     #[test]
-    fn test_array_into_iterator_drop_tiny_partial() {
+    fn test_optimal_array_into_iterator_drop_tiny_partial() {
         // an array that only requires a single block and only some need to be
         // dropped after partially iterating the values
         let inputs = ["one", "two", "three", "four"];
@@ -1480,7 +1524,7 @@ mod tests {
     }
 
     #[test]
-    fn test_array_into_iterator_drop_large_partial() {
+    fn test_optimal_array_into_iterator_drop_large_partial() {
         // visit enough to leave the first large block partially done
         let mut sut: OptimalArray<String> = OptimalArray::new();
         for _ in 0..512 {
@@ -1496,7 +1540,7 @@ mod tests {
     }
 
     #[test]
-    fn test_array_into_iterator_drop_large_more_partial() {
+    fn test_optimal_array_into_iterator_drop_large_more_partial() {
         // visit enough to leave at least one large block completely done
         let mut sut: OptimalArray<String> = OptimalArray::new();
         for _ in 0..512 {
