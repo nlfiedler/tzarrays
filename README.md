@@ -19,7 +19,7 @@ This is part of a collection of similar data structures:
 
 ### Memory Usage
 
-Compared to the `Vec` type in the Rust standard library, this data structure will have substantially less unused space. As an example, with `r` equal to `4` and an array with around 1 million entries, at most 32 slots will be unused. The index blocks contribute to the overhead of this data structure. This data structure will grow and shrink as needed. That is, as `push()` is called, new data blocks will be allocated to contain the new elements. Meanwhile, `pop()` will deallocate data blocks as they become empty. See the paper for a detailed analysis of the space overhead and time complexity.
+Compared to the `Vec` type in the Rust standard library, this data structure will have substantially less unused space. As an example, with `r` equal to `4` and an array with 1 million entries, at most 32 slots will be unused, while a `Vec` will have 48,576 unused slots (`Vec` capacity after zero starts at 4 and doubles each time). The index blocks contribute to the overhead of this data structure and that is on the order of O(rN^1/r). This data structure will grow and shrink as needed. That is, as `push()` is called, new data blocks will be allocated to contain the new elements. Meanwhile, `pop()` will deallocate data blocks as they become empty. See the paper for a detailed analysis of the space overhead and time complexity.
 
 ## Examples
 

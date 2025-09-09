@@ -5,12 +5,12 @@
 //! An implementation of resizable arrays as described in the paper **Optimal
 //! resizable arrays** by Tarjan and Zwick, published in 2023.
 //!
-//! * https://doi.org/10.48550/arXiv.2211.11009
+//! * <https://doi.org/10.48550/arXiv.2211.11009>
 //!
 //! # Memory Usage
 //!
 //! An empty resizable array is approximately 88 bytes in size, and while
-//! holding elements it will have a space overhead on the order of O(N^(1/r)) as
+//! holding elements it will have a space overhead on the order of O(rN^1/r) as
 //! described in the paper. As elements are added the array will grow by
 //! allocating additional data blocks. Likewise, as elements are removed from
 //! the end of the array, data blocks will be deallocated as they become empty.
@@ -18,11 +18,11 @@
 //! # Performance
 //!
 //! The performance and memory usage of this data structure is complicated,
-//! refer to the original paper for details.
-//!
+//! please refer to the original paper for details.
+//! 
 //! # Safety
 //!
-//! Because this data structure is allocating memory, copying bytes using
+//! Because this data structure is allocating memory, copying bytes using raw
 //! pointers, and de-allocating memory as needed, there are many `unsafe` blocks
 //! throughout the code.
 
@@ -30,6 +30,26 @@ use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::fmt;
 use std::ops::{Index, IndexMut};
 
+const USIZE_BITS: u32 = (8 * std::mem::size_of::<usize>()) as u32;
+
+/// Faster version of `base.pow(exponent)` using clz, subtraction,
+/// multiplication, and bit shifts.
+///
+/// Certain values are out of range for the optimal array, so not all values are
+/// allowed. For example, a base of 16384 and exponent of 5 is never going to
+/// happen for this data structure.
+#[inline]
+fn fast_power(base: usize, exponent: u32) -> usize {
+    1 << (((USIZE_BITS - base.leading_zeros()) - 1) * exponent)
+}
+
+/// Optimal resizable array for which the unused space is on the order of
+/// O(rN^1/r) plus additional overhead for the indices and cyclic arrays.
+///
+/// Supports push and pop (and swap/remove) operations only -- insert or remove
+/// at other locations is not supported.
+///
+/// See the paper for the details.
 pub struct OptimalArray<T> {
     /// N in the paper (number of elements)
     big_n: usize,
@@ -38,9 +58,9 @@ pub struct OptimalArray<T> {
     little_b: usize,
     /// r in the paper for which the largest blocks will hold B^r elements
     r: usize,
-    /// when n increases to upper_limit, a Rebuild(2B) is required
+    /// when N increases to upper_limit, a Rebuild(2B) is required
     upper_limit: usize,
-    /// when n decreases to lower_limit, a Rebuild(B/2) is required
+    /// when N decreases to lower_limit, a Rebuild(B/2) is required
     lower_limit: usize,
     /// n in the paper, number of occupied data blocks for i ∈ [r - 1], and the
     /// zeroth slot is the number of elements in the last block of size B
@@ -57,6 +77,11 @@ impl<T> OptimalArray<T> {
     }
 
     /// Return an empty array with zero capacity and the given `r` value.
+    ///
+    /// Values of `r` less than 2 are not supported. For higher values of `r`
+    /// there will be more levels of block sizes and the larger blocks will be
+    /// capable of holding many `B` sized blocks. The result is that the
+    /// `Rebuild` operation will occur less frequently.
     pub fn with_r(r: usize) -> Self {
         if r < 2 {
             panic!("r should be >= 2 (is {})", r);
@@ -66,9 +91,9 @@ impl<T> OptimalArray<T> {
         // would be absurd for blocks to be smaller than the pointers that point
         // to the blocks
         //
-        // allocate a single empty vector in the indices since A[0] is never
-        // meant to be used; seemingly this helps with the logic in the combine
-        // and split functions
+        // allocate a single empty index since A[0] is never meant to be used;
+        // seemingly this helps with the logic in the combine and split
+        // functions
         let mut big_a: Vec<CyclicArray<*mut T>> = Vec::with_capacity(r);
         big_a.push(CyclicArray::<*mut T>::new(0));
         for _ in 1..r {
@@ -76,9 +101,8 @@ impl<T> OptimalArray<T> {
             big_a.push(CyclicArray::<*mut T>::new(8));
         }
         assert_eq!(big_a.len(), r);
-        // little_n is mostly equivalent to A[i].len() except for n[1] which
-        // only tracks full blocks in A[1] while n[0] tracks the length of the
-        // empty or partial block at the end of A[1]
+        // little_n is equivalent to A[i].len() except for n[0] which tracks the
+        // number of elements of the last block at the end of A[1]
         let little_n: Vec<usize> = vec![0; r];
         Self {
             big_n: 0,
@@ -126,7 +150,7 @@ impl<T> OptimalArray<T> {
         // largest block size that can be filled with existing data, and moving
         // to smaller block sizes as less data remains
         for k in (1..=self.r - 1).rev() {
-            let block_len = one_b.pow(k as u32);
+            let block_len = fast_power(one_b, k as u32);
             while remaining >= block_len {
                 // allocate block of block_len size
                 let layout = Layout::array::<T>(block_len).expect("unexpected overflow");
@@ -142,7 +166,7 @@ impl<T> OptimalArray<T> {
                 let mut block_slot: usize = 0;
                 while block_slot < block_len {
                     // determine how much can be copied in each iteration
-                    let old_block_len = old_b.pow(old_k as u32);
+                    let old_block_len = fast_power(old_b, old_k as u32);
                     let copy_len = if old_block_len > block_len {
                         block_len
                     } else {
@@ -217,7 +241,7 @@ impl<T> OptimalArray<T> {
         // for i <- k - 1 downto 1 :
         for i in (1..=(k - 1)).rev() {
             // A[i + 1][ni+1] ← Allocate(Bi+1)
-            let new_block_len = one_b.pow((i + 1) as u32);
+            let new_block_len = fast_power(one_b, (i + 1) as u32);
             let layout = Layout::array::<T>(new_block_len).expect("unexpected overflow");
             let new_block_ptr = unsafe {
                 let ptr = alloc(layout).cast::<T>();
@@ -228,7 +252,7 @@ impl<T> OptimalArray<T> {
                 ptr
             };
             // for j <- 0 to B - 1 :
-            let old_block_len = one_b.pow(i as u32);
+            let old_block_len = fast_power(one_b, i as u32);
             for j in 0..one_b {
                 // Copy(A[i][j], 0, A[i + 1][ni+1], jBi, Bi)
                 let src = self.big_a[i].pop_front().expect("programming error");
@@ -276,7 +300,7 @@ impl<T> OptimalArray<T> {
             // for j <- 0 to B - 1 :
             for j in 0..one_b {
                 // A[i][j] ← Allocate(Bi)
-                let block_len = one_b.pow(i as u32);
+                let block_len = fast_power(one_b, i as u32);
                 let layout = Layout::array::<T>(block_len).expect("unexpected overflow");
                 let new_block_ptr = unsafe {
                     let ptr = alloc(layout).cast::<T>();
@@ -297,7 +321,7 @@ impl<T> OptimalArray<T> {
             }
 
             // Deallocate(A[i + 1][ni+1])
-            let old_block_len = one_b.pow((i + 1) as u32);
+            let old_block_len = fast_power(one_b, (i + 1) as u32);
             let layout = Layout::array::<T>(old_block_len).expect("unexpected overflow");
             unsafe { dealloc(old_block_ptr as *mut u8, layout) }
         }
@@ -318,9 +342,7 @@ impl<T> OptimalArray<T> {
         if self.little_n[1] == 2 * one_b && self.little_n[0] == one_b {
             self.combine();
             // combine does nothing to the n0 block, need to fall through to the
-            // next condition to ensure we allocate another B block; the paper
-            // makes the mistake of using if/else-if/else-if when it should be a
-            // series of if blocks
+            // next condition to ensure we allocate another B block
         }
         if self.little_n[1] == 0 || self.little_n[0] == one_b {
             // A[1][n1] ← Allocate(B)
@@ -441,7 +463,7 @@ impl<T> OptimalArray<T> {
         let one_b: usize = 1 << self.little_b;
         let mut capacity: usize = 0;
         for k in 1..self.r {
-            let block_len = one_b.pow(k as u32);
+            let block_len = fast_power(one_b, k as u32);
             capacity += block_len * self.little_n[k];
         }
         capacity
@@ -471,7 +493,7 @@ impl<T> OptimalArray<T> {
         while k > 0 {
             let nk = self.little_n[k];
             if nk > 0 {
-                block_size = one_b.pow(k as u32);
+                block_size = fast_power(one_b, k as u32);
                 let k_size = block_size * nk;
                 if index < (k_offset + k_size) {
                     break;
@@ -592,7 +614,7 @@ impl<T> OptimalArray<T> {
 
                 // drop all elements in all remaining blocks
                 for i in (1..=k).rev() {
-                    let len = one_b.pow(i as u32);
+                    let len = fast_power(one_b, i as u32);
                     while let Some(ptr) = self.big_a[i].pop_front() {
                         unsafe {
                             drop_in_place(slice_from_raw_parts_mut(ptr, len));
@@ -604,7 +626,7 @@ impl<T> OptimalArray<T> {
             } else {
                 // no drop, just deallocate the data blocks
                 for i in (1..=k).rev() {
-                    let len = one_b.pow(i as u32);
+                    let len = fast_power(one_b, i as u32);
                     while let Some(ptr) = self.big_a[i].pop_front() {
                         unsafe {
                             let layout = Layout::array::<T>(len).expect("unexpected overflow");
@@ -696,7 +718,187 @@ impl<'a, T> Iterator for OptArrayIter<'a, T> {
     }
 }
 
+impl<T> IntoIterator for OptimalArray<T> {
+    type Item = T;
+    type IntoIter = OptArrayIntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let mut me = std::mem::ManuallyDrop::new(self);
+        let little_n = std::mem::take(&mut me.little_n);
+        let big_a = std::mem::take(&mut me.big_a);
+        OptArrayIntoIter {
+            cursor: 0,
+            big_n: me.big_n,
+            little_b: me.little_b,
+            r: me.r,
+            little_n,
+            big_a,
+        }
+    }
+}
+
+/// An iterator that moves out of an optimal array.
+pub struct OptArrayIntoIter<T> {
+    /// offset into the array
+    cursor: usize,
+    /// N in the paper (number of elements)
+    big_n: usize,
+    /// b in the paper, the power of two that yields B, the smallest block size
+    /// in terms of elements (see page 13 of the paper)
+    little_b: usize,
+    /// r in the paper for which the largest blocks will hold B^r elements
+    r: usize,
+    /// n in the paper, number of occupied data blocks for i ∈ [r - 1], and the
+    /// zeroth slot is the number of elements in the last block of size B
+    little_n: Vec<usize>,
+    /// A in the paper, pointers to the index blocks for i ∈ [r - 1]; first slot
+    /// is left unused for convenience (see page 9 of the paper)
+    big_a: Vec<CyclicArray<*mut T>>,
+}
+
+impl<T> OptArrayIntoIter<T> {
+    fn locate(&self, index: usize) -> (usize, usize, usize) {
+        let one_b: usize = 1 << self.little_b;
+        let mut block_size: usize = 0;
+        // find index k ∈ [r−1] that contains the data block that contains
+        // the element located at logical offset `index`
+        let mut k: usize = self.r - 1;
+        let mut k_offset: usize = 0;
+        while k > 0 {
+            let nk = self.little_n[k];
+            if nk > 0 {
+                block_size = fast_power(one_b, k as u32);
+                let k_size = block_size * nk;
+                if index < (k_offset + k_size) {
+                    break;
+                }
+                k_offset += k_size;
+            }
+            k -= 1;
+        }
+        let k_index = index - k_offset;
+        if k == 0 {
+            // special-case, index is in last block of A[1]
+            (1, self.little_n[1], k_index)
+        } else {
+            let block = k_index / block_size;
+            let slot = k_index % block_size;
+            (k, block, slot)
+        }
+    }
+}
+
+impl<T> Iterator for OptArrayIntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cursor < self.big_n {
+            let (level, block, slot) = self.locate(self.cursor);
+            self.cursor += 1;
+            unsafe { Some((self.big_a[level][block].add(slot)).read()) }
+        } else {
+            None
+        }
+    }
+}
+
+impl<T> Drop for OptArrayIntoIter<T> {
+    fn drop(&mut self) {
+        use std::ptr::{drop_in_place, slice_from_raw_parts_mut};
+
+        // find the largest allocated blocks
+        let mut k: usize = self.r - 1;
+        while k > 0 && self.little_n[k] == 0 {
+            k -= 1;
+        }
+        let one_b: usize = 1 << self.little_b;
+
+        if std::mem::needs_drop::<T>() {
+            // drop items and deallocate the data blocks
+            let (first_level, first_block, first_slot) = self.locate(self.cursor);
+            let (last_level, last_block, last_slot) = self.locate(self.big_n - 1);
+            if first_level == last_level && first_block == last_block {
+                // special-case, remaining values are in only one block
+                if first_slot <= last_slot {
+                    let len = fast_power(one_b, first_level as u32);
+                    unsafe {
+                        // last_slot is pointing at the last element, need to
+                        // add one to include it in the slice
+                        let ptr = self.big_a[first_level][first_block];
+                        drop_in_place(slice_from_raw_parts_mut(
+                            ptr.add(first_slot),
+                            last_slot - first_slot + 1,
+                        ));
+                        let layout = Layout::array::<T>(len).expect("unexpected overflow");
+                        dealloc(ptr as *mut u8, layout);
+                    }
+                }
+            } else {
+                // first partial block needs special care
+                let block_len = fast_power(one_b, first_level as u32);
+                unsafe {
+                    drop_in_place(slice_from_raw_parts_mut(
+                        self.big_a[first_level][first_block].add(first_slot),
+                        block_len - first_slot,
+                    ));
+                }
+
+                // deallocate all blocks already visited
+                for _ in 0..=first_block {
+                    let ptr = self.big_a[first_level].pop_front().unwrap();
+                    let layout = Layout::array::<T>(block_len).expect("unexpected overflow");
+                    unsafe { dealloc(ptr as *mut u8, layout) }
+                }
+
+                // smallest block needs special care
+                if self.little_n[0] > 0 {
+                    let ptr = self.big_a[1].pop_back().unwrap();
+                    unsafe {
+                        drop_in_place(slice_from_raw_parts_mut(ptr, self.little_n[0]));
+                        let layout = Layout::array::<T>(one_b).expect("unexpected overflow");
+                        dealloc(ptr as *mut u8, layout);
+                    }
+                }
+
+                // drop all elements in all remaining blocks
+                for i in (1..=k).rev() {
+                    let len = fast_power(one_b, i as u32);
+                    while let Some(ptr) = self.big_a[i].pop_front() {
+                        unsafe {
+                            drop_in_place(slice_from_raw_parts_mut(ptr, len));
+                            let layout = Layout::array::<T>(len).expect("unexpected overflow");
+                            dealloc(ptr as *mut u8, layout);
+                        }
+                    }
+                }
+            }
+        } else {
+            // no drop, just deallocate the data blocks
+            for i in (1..=k).rev() {
+                let len = fast_power(one_b, i as u32);
+                while let Some(ptr) = self.big_a[i].pop_front() {
+                    unsafe {
+                        let layout = Layout::array::<T>(len).expect("unexpected overflow");
+                        dealloc(ptr as *mut u8, layout);
+                    }
+                }
+            }
+        }
+
+        // zero out everything to the initial state
+        self.cursor = 0;
+        self.big_n = 0;
+        self.little_b = 2;
+        for idx in 0..self.little_n.len() {
+            self.little_n[idx] = 0;
+        }
+    }
+}
+
 /// Basic circular buffer, or what Tarjan and Zwick call a cyclic array.
+///
+/// Unlike the `VecDeque` in the standard library, this array has a fixed size
+/// and will panic if a push is performed while the array is already full.
 pub struct CyclicArray<T> {
     /// allocated buffer of size `capacity`
     buffer: *mut T,
@@ -900,6 +1102,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_fast_power() {
+        let bases: Vec<usize> = vec![4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
+        let exponents: Vec<u32> = vec![0, 1, 2, 3, 4, 5];
+        for base in bases.iter() {
+            for exp in exponents.iter() {
+                assert_eq!(fast_power(*base, *exp), base.pow(*exp));
+            }
+        }
+    }
+
+    #[test]
     fn test_optimal_array_when_empty() {
         let sut: OptimalArray<usize> = OptimalArray::new();
         assert_eq!(sut.len(), 0);
@@ -973,12 +1186,23 @@ mod tests {
         }
         // Rebuild(2B) will have been called 9 times
         assert_eq!(sut.len(), 1_000_000);
-        println!("after push: {sut}");
         for index in 0..1_000_000 {
             assert_eq!(sut[index], index);
         }
         assert_eq!(sut[99_999], 99_999);
         assert_eq!(sut.capacity(), 1000448);
+
+        for value in (0..1_000_000).rev() {
+            assert_eq!(sut.pop(), Some(value));
+        }
+
+        // and do it again to be sure shrinking works correctly
+        for value in 0..1_000_000 {
+            sut.push(value);
+        }
+        for value in (0..1_000_000).rev() {
+            assert_eq!(sut.pop(), Some(value));
+        }
     }
 
     #[test]
@@ -994,6 +1218,18 @@ mod tests {
         }
         assert_eq!(sut[99_999], 99_999);
         assert_eq!(sut.capacity(), 1000064);
+
+        for value in (0..1_000_000).rev() {
+            assert_eq!(sut.pop(), Some(value));
+        }
+
+        // and do it again to be sure shrinking works correctly
+        for value in 0..1_000_000 {
+            sut.push(value);
+        }
+        for value in (0..1_000_000).rev() {
+            assert_eq!(sut.pop(), Some(value));
+        }
     }
 
     #[test]
@@ -1009,24 +1245,43 @@ mod tests {
         }
         assert_eq!(sut[99_999], 99_999);
         assert_eq!(sut.capacity(), 1000000);
-    }
 
-    #[test]
-    fn test_push_many_pop_all_verify() {
-        // push many values, then pop all off and verify
-        let mut sut: OptimalArray<usize> = OptimalArray::new();
-        for value in 0..16384 {
-            sut.push(value);
-        }
-        for value in (0..16384).rev() {
+        for value in (0..1_000_000).rev() {
             assert_eq!(sut.pop(), Some(value));
         }
 
         // and do it again to be sure shrinking works correctly
-        for value in 0..16384 {
+        for value in 0..1_000_000 {
             sut.push(value);
         }
-        for value in (0..16384).rev() {
+        for value in (0..1_000_000).rev() {
+            assert_eq!(sut.pop(), Some(value));
+        }
+    }
+
+    #[test]
+    fn test_optimal_array_push_many_ints_r5() {
+        let mut sut: OptimalArray<usize> = OptimalArray::with_r(5);
+        for value in 0..1_000_000 {
+            sut.push(value);
+        }
+        // Rebuild(2B) will have been called 2 times
+        assert_eq!(sut.len(), 1_000_000);
+        for index in 0..1_000_000 {
+            assert_eq!(sut[index], index);
+        }
+        assert_eq!(sut[99_999], 99_999);
+        assert_eq!(sut.capacity(), 1000000);
+
+        for value in (0..1_000_000).rev() {
+            assert_eq!(sut.pop(), Some(value));
+        }
+
+        // and do it again to be sure shrinking works correctly
+        for value in 0..1_000_000 {
+            sut.push(value);
+        }
+        for value in (0..1_000_000).rev() {
             assert_eq!(sut.pop(), Some(value));
         }
     }
@@ -1122,20 +1377,16 @@ mod tests {
     #[test]
     fn test_optimal_array_clear_and_reuse_ints() {
         let mut sut: OptimalArray<usize> = OptimalArray::new();
-        println!("before push: {sut}");
         for value in 0..1024 {
             sut.push(value);
         }
         assert_eq!(sut.len(), 1024);
-        println!("before clear: {sut}");
         sut.clear();
         assert_eq!(sut.len(), 0);
-        println!("after clear: {sut}");
         for value in 0..1024 {
             sut.push(value);
         }
         assert_eq!(sut.len(), 1024);
-        println!("after 2nd push: {sut}");
         for idx in 0..1024 {
             assert_eq!(sut[idx], idx);
         }
@@ -1183,6 +1434,81 @@ mod tests {
             }
             assert_eq!(sut.len(), 1_000);
         }
+    }
+
+    #[test]
+    fn test_array_into_iterator_ints_done() {
+        let mut sut: OptimalArray<usize> = OptimalArray::new();
+        for value in 0..1024 {
+            sut.push(value);
+        }
+        for (idx, elem) in sut.into_iter().enumerate() {
+            assert_eq!(idx, elem);
+        }
+        // sut.len(); // error: ownership of sut was moved
+    }
+
+    #[test]
+    fn test_array_into_iterator_drop_tiny_done() {
+        // an array that only requires a single block
+        let inputs = ["one", "two"];
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for item in inputs {
+            sut.push(item.to_owned());
+        }
+        for (idx, elem) in sut.into_iter().enumerate() {
+            assert_eq!(inputs[idx], elem);
+        }
+        // sut.len(); // error: ownership of sut was moved
+    }
+
+    #[test]
+    fn test_array_into_iterator_drop_tiny_partial() {
+        // an array that only requires a single block and only some need to be
+        // dropped after partially iterating the values
+        let inputs = ["one", "two", "three", "four"];
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for item in inputs {
+            sut.push(item.to_owned());
+        }
+        for (idx, _) in sut.into_iter().enumerate() {
+            if idx >= 1 {
+                break;
+            }
+        }
+        // implicitly drop()
+    }
+
+    #[test]
+    fn test_array_into_iterator_drop_large_partial() {
+        // visit enough to leave the first large block partially done
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for _ in 0..512 {
+            let value = ulid::Ulid::new().to_string();
+            sut.push(value);
+        }
+        for (idx, _) in sut.into_iter().enumerate() {
+            if idx >= 30 {
+                break;
+            }
+        }
+        // implicitly drop()
+    }
+
+    #[test]
+    fn test_array_into_iterator_drop_large_more_partial() {
+        // visit enough to leave at least one large block completely done
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for _ in 0..512 {
+            let value = ulid::Ulid::new().to_string();
+            sut.push(value);
+        }
+        for (idx, _) in sut.into_iter().enumerate() {
+            if idx >= 96 {
+                break;
+            }
+        }
+        // implicitly drop()
     }
 
     #[test]
