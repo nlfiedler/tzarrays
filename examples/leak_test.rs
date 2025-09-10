@@ -54,18 +54,36 @@ fn test_optimal_array() {
         array.push(value);
     }
 
-    // // push a bunch, pop a few, push more to test Grow/Shrink handling of the
-    // // extra empty data block
-    // let mut array: OptimalArray<u64> = OptimalArray::new();
-    // for value in 0..35 {
-    //     array.push(value);
-    // }
-    // for _ in 0..10 {
-    //     array.pop();
-    // }
-    // for value in 0..12 {
-    //     array.push(value);
-    // }
+    // push a bunch, pop a few to test shrink() and clear()
+    let mut array: OptimalArray<usize> = OptimalArray::new();
+    for value in 0..12 {
+        array.push(value);
+    }
+    assert_eq!(array.len(), 12);
+    for _ in 0..4 {
+        array.pop();
+    }
+    array.clear();
+
+    // push a bunch, pop a few, push some more to test push() and shrink()
+    // handling of the extra empty data block
+    let mut array: OptimalArray<usize> = OptimalArray::new();
+    for value in 0..12 {
+        array.push(value);
+    }
+    assert_eq!(array.len(), 12);
+    for _ in 0..8 {
+        array.pop();
+    }
+    assert_eq!(array.len(), 4);
+    for value in 4..12 {
+        array.push(value);
+    }
+    assert_eq!(array.len(), 12);
+    for (idx, elem) in array.iter().enumerate() {
+        assert_eq!(idx, *elem);
+    }
+    array.clear();
 
     // test pushing many elements then dropping
     let mut array: OptimalArray<String> = OptimalArray::new();
@@ -74,7 +92,31 @@ fn test_optimal_array() {
         array.push(value);
     }
 
-    // test pushing many elements then popping all of them
+    // test pushing only enough elements to allocate B-sized blocks without
+    // invoking combine, then popping all of them
+    let mut array: OptimalArray<String> = OptimalArray::new();
+    for _ in 0..12 {
+        let value = ulid::Ulid::new().to_string();
+        array.push(value);
+    }
+    while !array.is_empty() {
+        array.pop();
+    }
+
+    // test pushing enough elements to cause a combine, then popping all of them
+    // (when B = 4 must push more than 32 items)
+    let mut array: OptimalArray<String> = OptimalArray::new();
+    for _ in 0..33 {
+        let value = ulid::Ulid::new().to_string();
+        array.push(value);
+    }
+    while !array.is_empty() {
+        array.pop();
+    }
+
+    // test pushing enough elements to cause a rebuild or two to happen, then
+    // popping all of them (when B = 4 must push more than 64 items for one
+    // rebuild and more than 4096 for two rebuilds)
     let mut array: OptimalArray<String> = OptimalArray::new();
     for _ in 0..16384 {
         let value = ulid::Ulid::new().to_string();

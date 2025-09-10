@@ -10,6 +10,8 @@
 ** DONE write benchmarks to measure current performance
 ** DONE write a faster power function to replace =.pow()=
 ** TODO try implementing =get()= with O(1) from section 6.3 of paper
+*** TODO changes to be made [0/1]
+- [ ] little_n[1] must count only full B-sized blocks
 ** DONE try delaying the deallocation of the last empty block (see page 11)
 ** analysis of the 2023 paper
 *** they index the B, B^2, B^3, ... index blocks (A) starting from 1

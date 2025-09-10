@@ -9,7 +9,7 @@
 //!
 //! # Memory Usage
 //!
-//! An empty resizable array is approximately 88 bytes in size, and while
+//! An empty resizable array is approximately 96 bytes in size, and while
 //! holding elements it will have a space overhead on the order of O(rN^1/r) as
 //! described in the paper. As elements are added the array will grow by
 //! allocating additional data blocks. Likewise, as elements are removed from
@@ -91,9 +91,9 @@ impl<T> OptimalArray<T> {
             panic!("r should be >= 2 (is {})", r);
         }
         // start with B equal to 4 (little b = 2) because maybe the paper
-        // suggests that on page 12; pointers are at least that large so it
-        // would be absurd for blocks to be smaller than the pointers that point
-        // to the blocks
+        // suggests that on page 12 and 13; pointers are at least that large so
+        // it would be absurd for blocks to be smaller than the pointers that
+        // point to the blocks
         //
         // allocate a single empty index since A[0] is never meant to be used;
         // seemingly this helps with the logic in the combine and split
@@ -211,6 +211,14 @@ impl<T> OptimalArray<T> {
                 // a non-existent block
                 little_n[k] += 1;
             }
+        }
+        assert_eq!(remaining, 0);
+        if self.empty > 0 {
+            // an empty block remains at the end of level 1
+            let ptr = self.big_a[1].pop_back().unwrap();
+            let old_block_len = 1 << self.little_b;
+            let layout = Layout::array::<T>(old_block_len).expect("unexpected overflow");
+            unsafe { dealloc(ptr as *mut u8, layout) }
         }
 
         // transition to the new array layout
@@ -608,59 +616,60 @@ impl<T> OptimalArray<T> {
     pub fn clear(&mut self) {
         use std::ptr::{drop_in_place, slice_from_raw_parts_mut};
 
-        if self.big_n > 0 {
-            // find the largest allocated blocks
-            let mut k: usize = self.r - 1;
-            while k > 0 && self.little_n[k] == 0 {
-                k -= 1;
-            }
-            let one_b: usize = 1 << self.little_b;
-            if std::mem::needs_drop::<T>() {
-                // drop items and deallocate the data blocks
+        // find the largest allocated blocks
+        let mut k: usize = self.r - 1;
+        while k > 0 && self.little_n[k] == 0 {
+            k -= 1;
+        }
+        let one_b: usize = 1 << self.little_b;
 
-                // smallest block needs special care
-                if self.little_n[0] > 0 {
-                    let ptr = self.big_a[1].pop_back().unwrap();
+        if self.big_n > 0 && std::mem::needs_drop::<T>() {
+            // drop items and deallocate the data blocks
+
+            // smallest block needs special care
+            if self.little_n[0] > 0 {
+                let ptr = self.big_a[1].pop_back().unwrap();
+                unsafe {
+                    drop_in_place(slice_from_raw_parts_mut(ptr, self.little_n[0]));
+                    let layout = Layout::array::<T>(one_b).expect("unexpected overflow");
+                    dealloc(ptr as *mut u8, layout);
+                }
+            }
+
+            // drop all elements in all remaining blocks
+            for i in 1..=k {
+                let len = fast_power(one_b, i as u32);
+                while let Some(ptr) = self.big_a[i].pop_front() {
                     unsafe {
-                        drop_in_place(slice_from_raw_parts_mut(ptr, self.little_n[0]));
-                        let layout = Layout::array::<T>(one_b).expect("unexpected overflow");
+                        drop_in_place(slice_from_raw_parts_mut(ptr, len));
+                        let layout = Layout::array::<T>(len).expect("unexpected overflow");
                         dealloc(ptr as *mut u8, layout);
                     }
                 }
-
-                // drop all elements in all remaining blocks
-                for i in (1..=k).rev() {
-                    let len = fast_power(one_b, i as u32);
-                    while let Some(ptr) = self.big_a[i].pop_front() {
-                        unsafe {
-                            drop_in_place(slice_from_raw_parts_mut(ptr, len));
-                            let layout = Layout::array::<T>(len).expect("unexpected overflow");
-                            dealloc(ptr as *mut u8, layout);
-                        }
-                    }
-                }
-            } else {
-                // no drop, just deallocate the data blocks
-                for i in (1..=k).rev() {
-                    let len = fast_power(one_b, i as u32);
-                    while let Some(ptr) = self.big_a[i].pop_front() {
-                        unsafe {
-                            let layout = Layout::array::<T>(len).expect("unexpected overflow");
-                            dealloc(ptr as *mut u8, layout);
-                        }
+            }
+        } else {
+            // If elements do not need dropping, then simply deallocate the data
+            // blocks. Note that even an "empty" array may still have an empty
+            // data block lingering that needs to be freed.
+            for i in 1..=k {
+                let len = fast_power(one_b, i as u32);
+                while let Some(ptr) = self.big_a[i].pop_front() {
+                    unsafe {
+                        let layout = Layout::array::<T>(len).expect("unexpected overflow");
+                        dealloc(ptr as *mut u8, layout);
                     }
                 }
             }
+        }
 
-            // zero out everything to the initial state
-            self.big_n = 0;
-            self.empty = 0;
-            self.little_b = 2;
-            self.upper_limit = 1 << (2 * self.r);
-            self.lower_limit = 0;
-            for idx in 0..self.little_n.len() {
-                self.little_n[idx] = 0;
-            }
+        // zero out everything to the initial state
+        self.big_n = 0;
+        self.empty = 0;
+        self.little_b = 2;
+        self.upper_limit = 1 << (2 * self.r);
+        self.lower_limit = 0;
+        for idx in 0..self.little_n.len() {
+            self.little_n[idx] = 0;
         }
     }
 }
@@ -1307,21 +1316,21 @@ mod tests {
     fn test_optimal_array_grow_shrink_empty_block() {
         // test the empty block reuse logic for shrink and grow
         //
-        // default B is 4, so push 12, then pop 4, then push 8 more, then ensure
+        // default B is 4, so push 12, then pop 8, then push 8 more, then ensure
         // all values are present
         let mut sut: OptimalArray<usize> = OptimalArray::new();
         for value in 0..12 {
             sut.push(value);
         }
         assert_eq!(sut.len(), 12);
-        for _ in 0..4 {
+        for _ in 0..8 {
             sut.pop();
         }
-        assert_eq!(sut.len(), 8);
-        for value in 8..16 {
+        assert_eq!(sut.len(), 4);
+        for value in 4..12 {
             sut.push(value);
         }
-        assert_eq!(sut.len(), 16);
+        assert_eq!(sut.len(), 12);
         for (idx, elem) in sut.iter().enumerate() {
             assert_eq!(idx, *elem);
         }
