@@ -1,29 +1,16 @@
 //
 // Copyright (c) 2025 Nathan Fiedler
 //
-use tzarrays::OptimalArray;
-use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::time::Instant;
+use tzarrays::OptimalArray;
 
-fn benchmark_optarray(size: usize) {
+fn benchmark_tzarrays(coll: &mut OptimalArray<usize>, size: usize) {
     let start = Instant::now();
-    let mut coll: OptimalArray<usize> = OptimalArray::new();
     for value in 0..size {
         coll.push(value);
     }
     let duration = start.elapsed();
-    println!("optarray create: {:?}", duration);
-
-    // test random access `size` times; use SmallRng to avoid dominating the
-    // running time with random number generation
-    let mut rng = SmallRng::seed_from_u64(0);
-    let start = Instant::now();
-    for _ in 0..size {
-        let index = rng.random_range(0..size);
-        assert_eq!(coll[index], index);
-    }
-    let duration = start.elapsed();
-    println!("optarray random: {:?}", duration);
+    println!("tzarrays create: {:?}", duration);
 
     // test sequenced access for entire collection
     let start = Instant::now();
@@ -31,7 +18,10 @@ fn benchmark_optarray(size: usize) {
         assert_eq!(*value, index);
     }
     let duration = start.elapsed();
-    println!("optarray ordered: {:?}", duration);
+    println!("tzarrays ordered: {:?}", duration);
+
+    let unused = coll.capacity() - coll.len();
+    println!("unused capacity: {unused}");
 
     // test popping all elements from the array
     let start = Instant::now();
@@ -39,8 +29,8 @@ fn benchmark_optarray(size: usize) {
         coll.pop();
     }
     let duration = start.elapsed();
-    println!("optarray pop-all: {:?}", duration);
-    println!("optarray capacity: {}", coll.capacity());
+    println!("tzarrays pop-all: {:?}", duration);
+    println!("tzarrays capacity: {}", coll.capacity());
 }
 
 fn benchmark_vector(size: usize) {
@@ -52,17 +42,6 @@ fn benchmark_vector(size: usize) {
     let duration = start.elapsed();
     println!("vector create: {:?}", duration);
 
-    // test random access `size` times; use SmallRng to avoid dominating the
-    // running time with random number generation
-    let mut rng = SmallRng::seed_from_u64(0);
-    let start = Instant::now();
-    for _ in 0..size {
-        let index = rng.random_range(0..size);
-        assert_eq!(coll[index], index);
-    }
-    let duration = start.elapsed();
-    println!("vector random: {:?}", duration);
-
     // test sequenced access for entire collection
     let start = Instant::now();
     for (index, value) in coll.iter().enumerate() {
@@ -70,6 +49,9 @@ fn benchmark_vector(size: usize) {
     }
     let duration = start.elapsed();
     println!("vector ordered: {:?}", duration);
+
+    let unused = coll.capacity() - coll.len();
+    println!("unused capacity: {unused}");
 
     // test popping all elements from the vector
     let start = Instant::now();
@@ -82,8 +64,13 @@ fn benchmark_vector(size: usize) {
 }
 
 fn main() {
-    println!("creating OptimalArray...");
-    benchmark_optarray(100_000_000);
+    let size = 100_000_000;
+    println!("creating OptimalArray (r=3)...");
+    let mut coll: OptimalArray<usize> = OptimalArray::new();
+    benchmark_tzarrays(&mut coll, size);
+    println!("creating OptimalArray (r=4)...");
+    let mut coll: OptimalArray<usize> = OptimalArray::with_r(4);
+    benchmark_tzarrays(&mut coll, size);
     println!("creating Vec...");
-    benchmark_vector(100_000_000);
+    benchmark_vector(size);
 }
