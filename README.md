@@ -10,7 +10,7 @@ This data structure supports `push` and `pop` operations but does _not_ support 
 
 This is part of a collection of similar data structures:
 
-* [Optimal Arrays](https://github.com/nlfiedler/optarray)
+* [Optimal Arrays (Brodnik et. al.)](https://github.com/nlfiedler/optarray)
     - O(√N) space overhead and O(1) running time for most operations
 * [Extensible Arrays](https://github.com/nlfiedler/extarray)
     - O(√N) space overhead and O(1) running time for most operations
