@@ -11,18 +11,18 @@
 //!
 //! There are two implementations of the array described in the paper available
 //! in this crate.
-//! 
+//!
 //! The `simple` version is as described in Section 5 of the paper, which is
 //! little more than a streamlined version of the general implementation with an
 //! upper bound on the overhead of O(N^(1/3)). Because the code is simpler and
 //! avoids loops, the time complexity of many of the operations is constant.
-//! 
+//!
 //! Meanwhile, the `general` implementation allows for different values for `r`
 //! (2 or higher) and as such provides a means of reducing the unused space to
 //! small fractions of the overall array size. That flexibility comes at a cost
 //! to the time complexity, as now nearly all operations involve looping over
 //! the variable number of indices of data blocks of differing sizes.
-//! 
+//!
 //! There is also an implementation of a simple circular buffer, named
 //! `CyclicArray` because that is what the paper calls it. Its capacity is fixed
 //! at the time of construction and it will panic if the capacity is exceeded.
