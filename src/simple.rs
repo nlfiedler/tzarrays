@@ -44,6 +44,15 @@ enum BlockSize {
     Large,
 }
 
+impl fmt::Display for BlockSize {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            BlockSize::Small => write!(f, "sm"),
+            BlockSize::Large => write!(f, "lg"),
+        }
+    }
+}
+
 /// A simplified version of the optimal resizable array for which the unused
 /// space is on the order of O(N^1/3) plus additional overhead for the data
 /// block indices.
@@ -794,28 +803,30 @@ impl<T> Drop for OptArrayIntoIter<T> {
     fn drop(&mut self) {
         let one_b: usize = 1 << self.little_b;
 
-        if std::mem::needs_drop::<T>() {
+        if self.big_n > 0 && std::mem::needs_drop::<T>() {
             // drop items and deallocate the data blocks
             let (first_level, first_block, first_slot) = self.locate(self.cursor);
             let (last_level, last_block, last_slot) = self.locate(self.big_n - 1);
             if first_level == last_level && first_block == last_block {
+                let (block_index, block_len) = match first_level {
+                    BlockSize::Small => (&mut self.small, one_b),
+                    BlockSize::Large => (&mut self.large, one_b * one_b),
+                };
+                let ptr = block_index[first_block];
                 // special-case, remaining values are in only one block
                 if first_slot <= last_slot {
-                    let (block_index, block_len) = match first_level {
-                        BlockSize::Small => (&mut self.small, one_b),
-                        BlockSize::Large => (&mut self.large, one_b * one_b),
-                    };
                     unsafe {
                         // last_slot is pointing at the last element, need to
                         // add one to include it in the slice
-                        let ptr = block_index[first_block];
                         drop_in_place(slice_from_raw_parts_mut(
                             ptr.add(first_slot),
                             last_slot - first_slot + 1,
                         ));
-                        let layout = Layout::array::<T>(block_len).expect("unexpected overflow");
-                        dealloc(ptr as *mut u8, layout);
                     }
+                }
+                let layout = Layout::array::<T>(block_len).expect("unexpected overflow");
+                unsafe {
+                    dealloc(ptr as *mut u8, layout);
                 }
             } else {
                 // first partial block needs special care
@@ -1164,6 +1175,12 @@ mod tests {
     }
 
     #[test]
+    fn test_simple_array_into_iterator_drop_empty() {
+        let sut: OptimalArray<String> = OptimalArray::new();
+        assert_eq!(sut.into_iter().count(), 0);
+    }
+
+    #[test]
     fn test_simple_array_into_iterator_ints_done() {
         let mut sut: OptimalArray<usize> = OptimalArray::new();
         for value in 0..1024 {
@@ -1177,6 +1194,7 @@ mod tests {
 
     #[test]
     fn test_simple_array_into_iterator_drop_tiny_done() {
+        // TODO
         // an array that only requires a single block
         let inputs = ["one", "two"];
         let mut sut: OptimalArray<String> = OptimalArray::new();

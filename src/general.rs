@@ -625,7 +625,7 @@ impl<T> OptimalArray<T> {
 
         // find the largest allocated blocks
         let mut k: usize = self.r - 1;
-        while k > 0 && self.little_n[k] == 0 {
+        while k > 1 && self.little_n[k] == 0 {
             k -= 1;
         }
         let one_b: usize = 1 << self.little_b;
@@ -672,8 +672,8 @@ impl<T> OptimalArray<T> {
         self.little_b = 2;
         self.upper_limit = 1 << (2 * self.r);
         self.lower_limit = 0;
-        for idx in 0..self.little_n.len() {
-            self.little_n[idx] = 0;
+        for v in self.little_n.iter_mut() {
+            *v = 0;
         }
     }
 }
@@ -843,25 +843,27 @@ impl<T> Drop for OptArrayIntoIter<T> {
         }
         let one_b: usize = 1 << self.little_b;
 
-        if std::mem::needs_drop::<T>() {
+        if self.big_n > 0 && std::mem::needs_drop::<T>() {
             // drop items and deallocate the data blocks
             let (first_level, first_block, first_slot) = self.locate(self.cursor);
             let (last_level, last_block, last_slot) = self.locate(self.big_n - 1);
             if first_level == last_level && first_block == last_block {
+                let len = fast_power(one_b, first_level as u32);
+                let ptr = self.big_a[first_level][first_block];
                 // special-case, remaining values are in only one block
                 if first_slot <= last_slot {
-                    let len = fast_power(one_b, first_level as u32);
                     unsafe {
                         // last_slot is pointing at the last element, need to
                         // add one to include it in the slice
-                        let ptr = self.big_a[first_level][first_block];
                         drop_in_place(slice_from_raw_parts_mut(
                             ptr.add(first_slot),
                             last_slot - first_slot + 1,
                         ));
-                        let layout = Layout::array::<T>(len).expect("unexpected overflow");
-                        dealloc(ptr as *mut u8, layout);
                     }
+                }
+                let layout = Layout::array::<T>(len).expect("unexpected overflow");
+                unsafe {
+                    dealloc(ptr as *mut u8, layout);
                 }
             } else {
                 // first partial block needs special care
@@ -1011,6 +1013,7 @@ mod tests {
 
     #[test]
     fn test_general_array_push_many_ints_r2() {
+        // TODO: leaks memory (64 bytes) for each push/pop cycle
         let mut sut: OptimalArray<usize> = OptimalArray::with_r(2);
         for value in 0..1_000_000 {
             sut.push(value);
@@ -1026,6 +1029,8 @@ mod tests {
         for value in (0..1_000_000).rev() {
             assert_eq!(sut.pop(), Some(value));
         }
+        assert_eq!(sut.len(), 0);
+        assert_eq!(sut.capacity(), 0);
 
         // and do it again to be sure shrinking works correctly
         for value in 0..1_000_000 {
@@ -1034,6 +1039,8 @@ mod tests {
         for value in (0..1_000_000).rev() {
             assert_eq!(sut.pop(), Some(value));
         }
+        assert_eq!(sut.len(), 0);
+        assert_eq!(sut.capacity(), 0);
     }
 
     #[test]
@@ -1053,6 +1060,8 @@ mod tests {
         for value in (0..1_000_000).rev() {
             assert_eq!(sut.pop(), Some(value));
         }
+        assert_eq!(sut.len(), 0);
+        assert_eq!(sut.capacity(), 0);
 
         // and do it again to be sure shrinking works correctly
         for value in 0..1_000_000 {
@@ -1061,6 +1070,8 @@ mod tests {
         for value in (0..1_000_000).rev() {
             assert_eq!(sut.pop(), Some(value));
         }
+        assert_eq!(sut.len(), 0);
+        assert_eq!(sut.capacity(), 0);
     }
 
     #[test]
@@ -1080,6 +1091,8 @@ mod tests {
         for value in (0..1_000_000).rev() {
             assert_eq!(sut.pop(), Some(value));
         }
+        assert_eq!(sut.len(), 0);
+        assert_eq!(sut.capacity(), 0);
 
         // and do it again to be sure shrinking works correctly
         for value in 0..1_000_000 {
@@ -1088,6 +1101,8 @@ mod tests {
         for value in (0..1_000_000).rev() {
             assert_eq!(sut.pop(), Some(value));
         }
+        assert_eq!(sut.len(), 0);
+        assert_eq!(sut.capacity(), 0);
     }
 
     #[test]
@@ -1107,6 +1122,8 @@ mod tests {
         for value in (0..1_000_000).rev() {
             assert_eq!(sut.pop(), Some(value));
         }
+        assert_eq!(sut.len(), 0);
+        assert_eq!(sut.capacity(), 0);
 
         // and do it again to be sure shrinking works correctly
         for value in 0..1_000_000 {
@@ -1115,6 +1132,8 @@ mod tests {
         for value in (0..1_000_000).rev() {
             assert_eq!(sut.pop(), Some(value));
         }
+        assert_eq!(sut.len(), 0);
+        assert_eq!(sut.capacity(), 0);
     }
 
     #[test]
@@ -1277,6 +1296,12 @@ mod tests {
             assert_eq!(idx, elem);
         }
         // sut.len(); // error: ownership of sut was moved
+    }
+
+    #[test]
+    fn test_general_array_into_iterator_drop_empty() {
+        let sut: OptimalArray<String> = OptimalArray::new();
+        assert_eq!(sut.into_iter().count(), 0);
     }
 
     #[test]
