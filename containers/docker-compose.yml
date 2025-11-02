@@ -1,3 +1,4 @@
+name: tzarrays
 services:
   leaktest:
     build:
