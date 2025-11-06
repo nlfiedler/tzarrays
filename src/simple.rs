@@ -727,13 +727,15 @@ impl<T> IntoIterator for OptimalArray<T> {
         let mut me = std::mem::ManuallyDrop::new(self);
         let small = std::mem::take(&mut me.small);
         let large = std::mem::take(&mut me.large);
+        let small_size: usize = 1 << me.little_b;
+        let large_size: usize = small_size * small_size;
+        let last_large = large_size * me.n2;
         OptArrayIntoIter {
             cursor: 0,
             big_n: me.big_n,
-            little_b: me.little_b,
-            n0: me.n0,
-            n1: me.n1,
-            n2: me.n2,
+            small_size,
+            large_size,
+            last_large,
             small,
             large,
         }
@@ -746,15 +748,12 @@ pub struct OptArrayIntoIter<T> {
     cursor: usize,
     /// N in the paper (number of elements)
     big_n: usize,
-    /// b in the paper, the power of two that yields B, the smallest block size
-    /// in terms of elements (see page 13 of the paper)
-    little_b: usize,
-    /// number of elements in the partially filled block of size B
-    n0: usize,
-    /// number of small data blocks of size B that are not empty
-    n1: usize,
-    /// number of large data blocks of size B^2
-    n2: usize,
+    /// number of elements in small blocks
+    small_size: usize,
+    /// number of elements in large blocks
+    large_size: usize,
+    /// index of the last large block
+    last_large: usize,
     /// the large blocks of size B^2
     large: CyclicArray<*mut T>,
     /// the small blocks of size B
@@ -763,19 +762,16 @@ pub struct OptArrayIntoIter<T> {
 
 impl<T> OptArrayIntoIter<T> {
     fn locate(&self, index: usize) -> (BlockSize, usize, usize) {
-        let small_size: usize = 1 << self.little_b;
-        let large_size: usize = small_size * small_size;
-        let last_large = large_size * self.n2;
-        if index < last_large {
+        if index < self.last_large {
             // among the large blocks
-            let block = index / large_size;
-            let slot = index % large_size;
+            let block = index / self.large_size;
+            let slot = index % self.large_size;
             (BlockSize::Large, block, slot)
         } else {
             // among the small blocks
-            let s_index = index - last_large;
-            let block = s_index / small_size;
-            let slot = s_index % small_size;
+            let s_index = index - self.last_large;
+            let block = s_index / self.small_size;
+            let slot = s_index % self.small_size;
             (BlockSize::Small, block, slot)
         }
     }
@@ -801,102 +797,66 @@ impl<T> Iterator for OptArrayIntoIter<T> {
 
 impl<T> Drop for OptArrayIntoIter<T> {
     fn drop(&mut self) {
-        let one_b: usize = 1 << self.little_b;
-
-        if self.big_n > 0 && std::mem::needs_drop::<T>() {
-            // drop items and deallocate the data blocks
-            let (first_level, first_block, first_slot) = self.locate(self.cursor);
-            let (last_level, last_block, last_slot) = self.locate(self.big_n - 1);
-            if first_level == last_level && first_block == last_block {
-                let (block_index, block_len) = match first_level {
-                    BlockSize::Small => (&mut self.small, one_b),
-                    BlockSize::Large => (&mut self.large, one_b * one_b),
-                };
-                let ptr = block_index[first_block];
-                // special-case, remaining values are in only one block
-                if first_slot <= last_slot {
+        // all visited elements have already been dropped, so carefully examine
+        // all of the blocks and determine which ones have unvisited elements
+        let (first_level, first_block, first_slot) = self.locate(self.cursor);
+        let (last_level, last_block, last_slot) = if self.big_n == 0 {
+            (BlockSize::Small, 0, 0)
+        } else {
+            self.locate(self.big_n - 1)
+        };
+        let not_finished = self.cursor < self.big_n;
+        let levels = [
+            (BlockSize::Large, &mut self.large, self.large_size),
+            (BlockSize::Small, &mut self.small, self.small_size),
+        ];
+        for (level, block_index, block_len) in levels.into_iter() {
+            let layout = Layout::array::<T>(block_len).expect("unexpected overflow");
+            let mut block = 0;
+            while let Some(ptr) = block_index.pop_front() {
+                let unvisited = (level != first_level || block >= first_block)
+                    && (level != last_level || block < last_block);
+                let is_first = level == first_level && block == first_block;
+                let is_last = level == last_level && block == last_block;
+                if is_first && is_last {
+                    // special-case for first block being the last block
+                    if first_slot <= last_slot {
+                        unsafe {
+                            drop_in_place(slice_from_raw_parts_mut(
+                                ptr.add(first_slot),
+                                last_slot - first_slot + 1,
+                            ));
+                        }
+                    }
+                } else if is_first {
+                    // special-case for partially visited first block
                     unsafe {
-                        // last_slot is pointing at the last element, need to
-                        // add one to include it in the slice
                         drop_in_place(slice_from_raw_parts_mut(
                             ptr.add(first_slot),
-                            last_slot - first_slot + 1,
+                            block_len - first_slot,
                         ));
                     }
+                } else if is_last && not_finished {
+                    // special-case for maybe partially filled last block
+                    unsafe {
+                        drop_in_place(slice_from_raw_parts_mut(ptr, last_slot + 1));
+                    }
+                } else if unvisited {
+                    // all other unvisited blocks are dropped in their entirety
+                    unsafe {
+                        drop_in_place(slice_from_raw_parts_mut(ptr, block_len));
+                    }
                 }
-                let layout = Layout::array::<T>(block_len).expect("unexpected overflow");
                 unsafe {
                     dealloc(ptr as *mut u8, layout);
                 }
-            } else {
-                // first partial block needs special care
-                let (block_index, block_len) = match first_level {
-                    BlockSize::Small => (&mut self.small, one_b),
-                    BlockSize::Large => (&mut self.large, one_b * one_b),
-                };
-                unsafe {
-                    drop_in_place(slice_from_raw_parts_mut(
-                        block_index[first_block].add(first_slot),
-                        block_len - first_slot,
-                    ));
-                }
-
-                // deallocate all blocks already visited
-                for _ in 0..=first_block {
-                    let ptr = block_index.pop_front().unwrap();
-                    let layout = Layout::array::<T>(block_len).expect("unexpected overflow");
-                    unsafe { dealloc(ptr as *mut u8, layout) }
-                }
-
-                // smallest block needs special care
-                if self.n0 > 0 {
-                    let ptr = self.small.pop_back().unwrap();
-                    unsafe {
-                        drop_in_place(slice_from_raw_parts_mut(ptr, self.n0));
-                        let layout = Layout::array::<T>(one_b).expect("unexpected overflow");
-                        dealloc(ptr as *mut u8, layout);
-                    }
-                }
-
-                // drop all elements in all remaining blocks
-                for level in [BlockSize::Large, BlockSize::Small].iter() {
-                    let (block_index, block_len) = match level {
-                        BlockSize::Small => (&mut self.small, one_b),
-                        BlockSize::Large => (&mut self.large, one_b * one_b),
-                    };
-                    while let Some(ptr) = block_index.pop_front() {
-                        unsafe {
-                            drop_in_place(slice_from_raw_parts_mut(ptr, block_len));
-                            let layout =
-                                Layout::array::<T>(block_len).expect("unexpected overflow");
-                            dealloc(ptr as *mut u8, layout);
-                        }
-                    }
-                }
-            }
-        } else {
-            // no drop, just deallocate the data blocks
-            for level in [BlockSize::Large, BlockSize::Small].iter() {
-                let (block_index, block_len) = match level {
-                    BlockSize::Small => (&mut self.small, one_b),
-                    BlockSize::Large => (&mut self.large, one_b * one_b),
-                };
-                while let Some(ptr) = block_index.pop_front() {
-                    unsafe {
-                        let layout = Layout::array::<T>(block_len).expect("unexpected overflow");
-                        dealloc(ptr as *mut u8, layout);
-                    }
-                }
+                block += 1;
             }
         }
 
         // zero out everything to the initial state
         self.cursor = 0;
         self.big_n = 0;
-        self.little_b = 2;
-        self.n0 = 0;
-        self.n1 = 0;
-        self.n2 = 0;
     }
 }
 
@@ -1150,6 +1110,35 @@ mod tests {
     }
 
     #[test]
+    fn test_simple_array_push_many_strings() {
+        let mut sut = OptimalArray::<String>::new();
+        for _ in 0..1_000_000 {
+            let value = ulid::Ulid::new().to_string();
+            sut.push(value);
+        }
+        assert_eq!(sut.len(), 1_000_000);
+        assert_eq!(sut.capacity(), 1_000_064);
+        while let Some(value) = sut.pop() {
+            assert_eq!(value.len(), 26);
+        }
+        assert_eq!(sut.len(), 0);
+        assert_eq!(sut.capacity(), 4);
+
+        // and do it again to be sure shrinking works correctly
+        for _ in 0..1_000_000 {
+            let value = ulid::Ulid::new().to_string();
+            sut.push(value);
+        }
+        assert_eq!(sut.len(), 1_000_000);
+        assert_eq!(sut.capacity(), 1_000_064);
+        while let Some(value) = sut.pop() {
+            assert_eq!(value.len(), 26);
+        }
+        assert_eq!(sut.len(), 0);
+        assert_eq!(sut.capacity(), 4);
+    }
+
+    #[test]
     fn test_simple_array_push_get_many_instances_ints() {
         // test allocating, filling, and then dropping many instances
         for _ in 0..1_000 {
@@ -1181,6 +1170,128 @@ mod tests {
     }
 
     #[test]
+    fn test_simple_array_into_iterator_edge_case() {
+        // add 4, iterate 3
+        let inputs = ["one", "two", "three", "four"];
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for item in inputs {
+            sut.push(item.to_owned());
+        }
+        let mut iter = sut.into_iter();
+        for _ in 0..3 {
+            iter.next();
+        }
+
+        // add 4, iterate 4
+        let inputs = ["one", "two", "three", "four"];
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for item in inputs {
+            sut.push(item.to_owned());
+        }
+        assert_eq!(4, sut.into_iter().count());
+
+        // add 8, iterate 3
+        let inputs = [
+            "one", "two", "three", "four", "five", "six", "seven", "eight",
+        ];
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for item in inputs {
+            sut.push(item.to_owned());
+        }
+        let mut iter = sut.into_iter();
+        for _ in 0..3 {
+            iter.next();
+        }
+
+        // add 8, iterate 5
+        let inputs = [
+            "one", "two", "three", "four", "five", "six", "seven", "eight",
+        ];
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for item in inputs {
+            sut.push(item.to_owned());
+        }
+        let mut iter = sut.into_iter();
+        for _ in 0..5 {
+            iter.next();
+        }
+
+        // add 8, iterate 8
+        let inputs = [
+            "one", "two", "three", "four", "five", "six", "seven", "eight",
+        ];
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for item in inputs {
+            sut.push(item.to_owned());
+        }
+        assert_eq!(8, sut.into_iter().count());
+
+        // add 7, iterate 3
+        let inputs = ["one", "two", "three", "four", "five", "six", "seven"];
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for item in inputs {
+            sut.push(item.to_owned());
+        }
+        let mut iter = sut.into_iter();
+        for _ in 0..3 {
+            iter.next();
+        }
+
+        // add 7, iterate 5
+        let inputs = ["one", "two", "three", "four", "five", "six", "seven"];
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for item in inputs {
+            sut.push(item.to_owned());
+        }
+        let mut iter = sut.into_iter();
+        for _ in 0..5 {
+            iter.next();
+        }
+
+        // add 13, iterate 3
+        let inputs = [
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+            "eleven", "twelve", "thirteen",
+        ];
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for item in inputs {
+            sut.push(item.to_owned());
+        }
+        let mut iter = sut.into_iter();
+        for _ in 0..3 {
+            iter.next();
+        }
+
+        // add 13, iterate 5
+        let inputs = [
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+            "eleven", "twelve", "thirteen",
+        ];
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for item in inputs {
+            sut.push(item.to_owned());
+        }
+        let mut iter = sut.into_iter();
+        for _ in 0..5 {
+            iter.next();
+        }
+
+        // add 13, iterate 9
+        let inputs = [
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+            "eleven", "twelve", "thirteen",
+        ];
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for item in inputs {
+            sut.push(item.to_owned());
+        }
+        let mut iter = sut.into_iter();
+        for _ in 0..9 {
+            iter.next();
+        }
+    }
+
+    #[test]
     fn test_simple_array_into_iterator_ints_done() {
         let mut sut: OptimalArray<usize> = OptimalArray::new();
         for value in 0..1024 {
@@ -1194,7 +1305,6 @@ mod tests {
 
     #[test]
     fn test_simple_array_into_iterator_drop_tiny_done() {
-        // TODO
         // an array that only requires a single block
         let inputs = ["one", "two"];
         let mut sut: OptimalArray<String> = OptimalArray::new();
@@ -1222,6 +1332,16 @@ mod tests {
             }
         }
         // implicitly drop()
+    }
+
+    #[test]
+    fn test_simple_array_into_iterator_drop_all() {
+        let mut sut: OptimalArray<String> = OptimalArray::new();
+        for _ in 0..512 {
+            let value = ulid::Ulid::new().to_string();
+            sut.push(value);
+        }
+        let _ = sut.into_iter();
     }
 
     #[test]
