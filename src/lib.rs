@@ -29,9 +29,70 @@
 
 use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::ops::Index;
+use std::ptr::NonNull;
 
 pub mod general;
 pub mod simple;
+
+/// Zero-sized element type for tests that counts how many values were dropped
+/// on the current thread (each test runs in its own thread).
+#[cfg(test)]
+pub(crate) mod zst {
+    use std::cell::Cell;
+
+    thread_local! {
+        static DROPS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub(crate) struct Zst;
+
+    impl Drop for Zst {
+        fn drop(&mut self) {
+            DROPS.with(|d| d.set(d.get() + 1));
+        }
+    }
+
+    /// Number of `Zst` values dropped so far on this thread.
+    pub(crate) fn drops() -> usize {
+        DROPS.with(|d| d.get())
+    }
+}
+
+/// Allocate uninitialized memory for `len` elements of type `T`.
+///
+/// When the allocation would be zero bytes (`len` is zero or `T` is a
+/// zero-sized type) no memory is allocated and a dangling, well-aligned
+/// pointer is returned instead, as calling the allocator with a zero-sized
+/// layout is undefined behavior.
+///
+/// # Panics
+///
+/// Panics if the allocation would exceed `isize::MAX` bytes.
+pub(crate) fn allocate<T>(len: usize) -> *mut T {
+    let layout = Layout::array::<T>(len).expect("unexpected overflow");
+    if layout.size() == 0 {
+        return NonNull::<T>::dangling().as_ptr();
+    }
+    let ptr = unsafe { alloc(layout).cast::<T>() };
+    if ptr.is_null() {
+        handle_alloc_error(layout);
+    }
+    ptr
+}
+
+/// Release memory previously returned by `allocate()` for `len` elements.
+///
+/// # Safety
+///
+/// `ptr` must have been returned by `allocate::<T>(len)` with the same `len`,
+/// and must not be used after this call.
+pub(crate) unsafe fn deallocate<T>(ptr: *mut T, len: usize) {
+    let layout = Layout::array::<T>(len).expect("unexpected overflow");
+    if layout.size() != 0 {
+        unsafe { dealloc(ptr.cast::<u8>(), layout) }
+    }
+}
 
 /// Basic circular buffer, or what Tarjan and Zwick call a cyclic array.
 ///
@@ -51,20 +112,8 @@ pub struct CyclicArray<T> {
 impl<T> CyclicArray<T> {
     /// Construct a new cyclic array with the given capacity.
     pub fn new(capacity: usize) -> Self {
-        let buffer = if capacity == 0 {
-            std::ptr::null_mut::<T>()
-        } else {
-            let layout = Layout::array::<T>(capacity).expect("unexpected overflow");
-            unsafe {
-                let ptr = alloc(layout).cast::<T>();
-                if ptr.is_null() {
-                    handle_alloc_error(layout);
-                }
-                ptr
-            }
-        };
         Self {
-            buffer,
+            buffer: allocate::<T>(capacity),
             capacity,
             head: 0,
             count: 0,
@@ -233,14 +282,7 @@ impl<T> Index<usize> for CyclicArray<T> {
 impl<T> Drop for CyclicArray<T> {
     fn drop(&mut self) {
         self.clear();
-        // new() does not allocate when capacity is zero, so there is nothing
-        // to free; passing a null pointer to dealloc() is undefined behavior
-        if !self.buffer.is_null() {
-            let layout = Layout::array::<T>(self.capacity).expect("unexpected overflow");
-            unsafe {
-                dealloc(self.buffer as *mut u8, layout);
-            }
-        }
+        unsafe { deallocate(self.buffer, self.capacity) }
     }
 }
 
@@ -454,5 +496,45 @@ mod tests {
         assert_eq!(sut.capacity(), 10);
         assert!(sut.is_empty());
         assert!(!sut.is_full());
+    }
+
+    #[test]
+    fn test_cyclic_array_zero_sized_unit() {
+        let mut sut = CyclicArray::<()>::new(10);
+        for _ in 0..7 {
+            sut.push_back(());
+        }
+        sut.push_front(());
+        assert_eq!(sut.len(), 8);
+        assert_eq!(sut.get(7), Some(&()));
+        assert_eq!(sut.pop_front(), Some(()));
+        assert_eq!(sut.pop_back(), Some(()));
+        assert_eq!(sut.len(), 6);
+    }
+
+    #[test]
+    fn test_cyclic_array_zero_sized_drop() {
+        use crate::zst::{Zst, drops};
+        let mut sut = CyclicArray::<Zst>::new(10);
+        // wrap around the end of the buffer
+        for _ in 0..8 {
+            sut.push_back(Zst);
+        }
+        for _ in 0..5 {
+            sut.pop_front();
+        }
+        assert_eq!(drops(), 5);
+        while !sut.is_full() {
+            sut.push_back(Zst);
+        }
+        sut.clear();
+        assert_eq!(drops(), 15);
+        for _ in 0..4 {
+            sut.push_front(Zst);
+        }
+        drop(sut);
+        assert_eq!(drops(), 19);
+        // zero capacity with a zero-sized type
+        drop(CyclicArray::<Zst>::new(0));
     }
 }

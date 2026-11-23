@@ -21,12 +21,12 @@
 //! variable number of indices of differently sized data blocks.
 //!
 //! # Values for r
-//! 
+//!
 //! Values for the `r` parameter can be 2 or higher, although as `r` becomes
 //! higher, more time is spent combining and rebuilding the array. Note also
 //! that when `r` equals `2`, this data structure becomes little more than a
 //! slower version of a Hashed Array Tree.
-//! 
+//!
 //! # Safety
 //!
 //! Because this data structure is allocating memory, copying bytes using raw
@@ -34,7 +34,7 @@
 //! throughout the code.
 
 use super::CyclicArray;
-use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
+use super::{allocate, deallocate};
 use std::fmt;
 use std::ops::{Index, IndexMut};
 use std::ptr::{drop_in_place, slice_from_raw_parts_mut};
@@ -161,14 +161,7 @@ impl<T> OptimalArray<T> {
             let block_len = fast_power(one_b, k as u32);
             while remaining >= block_len {
                 // allocate block of block_len size
-                let layout = Layout::array::<T>(block_len).expect("unexpected overflow");
-                unsafe {
-                    let ptr = alloc(layout).cast::<T>();
-                    if ptr.is_null() {
-                        handle_alloc_error(layout);
-                    }
-                    big_a[k].push_back(ptr);
-                }
+                big_a[k].push_back(allocate::<T>(block_len));
 
                 // iterate as long as the new block still has capacity
                 let mut block_slot: usize = 0;
@@ -196,9 +189,7 @@ impl<T> OptimalArray<T> {
                         // deallocate old block
                         unsafe {
                             let ptr = self.big_a[old_k][old_block];
-                            let layout =
-                                Layout::array::<T>(old_block_len).expect("unexpected overflow");
-                            dealloc(ptr as *mut u8, layout);
+                            deallocate(ptr, old_block_len);
                         }
                         old_block += 1;
                         old_slot = 0;
@@ -251,15 +242,8 @@ impl<T> OptimalArray<T> {
         for i in (1..=(k - 1)).rev() {
             // A[i + 1][ni+1] ← Allocate(Bi+1)
             let new_block_len = fast_power(one_b, (i + 1) as u32);
-            let layout = Layout::array::<T>(new_block_len).expect("unexpected overflow");
-            let new_block_ptr = unsafe {
-                let ptr = alloc(layout).cast::<T>();
-                if ptr.is_null() {
-                    handle_alloc_error(layout);
-                }
-                self.big_a[i + 1].push_back(ptr);
-                ptr
-            };
+            let new_block_ptr = allocate::<T>(new_block_len);
+            self.big_a[i + 1].push_back(new_block_ptr);
             // for j <- 0 to B - 1 :
             let old_block_len = fast_power(one_b, i as u32);
             for j in 0..one_b {
@@ -270,8 +254,7 @@ impl<T> OptimalArray<T> {
                     let dst = new_block_ptr.add(dest_slot);
                     std::ptr::copy(src, dst, old_block_len);
                     // Deallocate(A[i][j])
-                    let layout = Layout::array::<T>(old_block_len).expect("unexpected overflow");
-                    dealloc(src as *mut u8, layout);
+                    deallocate(src, old_block_len);
                 }
                 // A[i][j] ← A[i][j + B] // Shift indices
                 // -- pop_front() effectively did this already
@@ -310,14 +293,7 @@ impl<T> OptimalArray<T> {
             for j in 0..one_b {
                 // A[i][j] ← Allocate(Bi)
                 let block_len = fast_power(one_b, i as u32);
-                let layout = Layout::array::<T>(block_len).expect("unexpected overflow");
-                let new_block_ptr = unsafe {
-                    let ptr = alloc(layout).cast::<T>();
-                    if ptr.is_null() {
-                        handle_alloc_error(layout);
-                    }
-                    ptr
-                };
+                let new_block_ptr = allocate::<T>(block_len);
                 self.big_a[i].push_back(new_block_ptr);
                 // need to increment ni, another mistake in the paper?
                 self.little_n[i] += 1;
@@ -331,8 +307,7 @@ impl<T> OptimalArray<T> {
 
             // Deallocate(A[i + 1][ni+1])
             let old_block_len = fast_power(one_b, (i + 1) as u32);
-            let layout = Layout::array::<T>(old_block_len).expect("unexpected overflow");
-            unsafe { dealloc(old_block_ptr as *mut u8, layout) }
+            unsafe { deallocate(old_block_ptr, old_block_len) }
         }
         // n0 ← B  -- another mistake in the paper?
         self.little_n[0] = one_b;
@@ -357,14 +332,7 @@ impl<T> OptimalArray<T> {
         }
         if self.little_n[1] == 0 || self.little_n[0] == one_b {
             // A[1][n1] ← Allocate(B)
-            let layout = Layout::array::<T>(one_b).expect("unexpected overflow");
-            unsafe {
-                let ptr = alloc(layout).cast::<T>();
-                if ptr.is_null() {
-                    handle_alloc_error(layout);
-                }
-                self.big_a[1].push_back(ptr);
-            }
+            self.big_a[1].push_back(allocate::<T>(one_b));
             // n1 ← n1 + 1
             self.little_n[1] += 1;
             // n0 ← 0
@@ -415,8 +383,7 @@ impl<T> OptimalArray<T> {
             let one_b: usize = 1 << self.little_b;
             // Deallocate(A[1][n1-1])
             let ptr = self.big_a[1].pop_back().unwrap();
-            let layout = Layout::array::<T>(one_b).expect("unexpected overflow");
-            unsafe { dealloc(ptr as *mut u8, layout) }
+            unsafe { deallocate(ptr, one_b) }
             // n1 ← n1 - 1
             self.little_n[1] -= 1;
             // n0 ← B -- another mistake in the paper?
@@ -646,8 +613,7 @@ impl<T> OptimalArray<T> {
                 let ptr = self.big_a[1].pop_back().unwrap();
                 unsafe {
                     drop_in_place(slice_from_raw_parts_mut(ptr, self.little_n[0]));
-                    let layout = Layout::array::<T>(one_b).expect("unexpected overflow");
-                    dealloc(ptr as *mut u8, layout);
+                    deallocate(ptr, one_b);
                 }
             }
 
@@ -657,8 +623,7 @@ impl<T> OptimalArray<T> {
                 while let Some(ptr) = self.big_a[i].pop_front() {
                     unsafe {
                         drop_in_place(slice_from_raw_parts_mut(ptr, len));
-                        let layout = Layout::array::<T>(len).expect("unexpected overflow");
-                        dealloc(ptr as *mut u8, layout);
+                        deallocate(ptr, len);
                     }
                 }
             }
@@ -668,8 +633,7 @@ impl<T> OptimalArray<T> {
                 let len = fast_power(one_b, i as u32);
                 while let Some(ptr) = self.big_a[i].pop_front() {
                     unsafe {
-                        let layout = Layout::array::<T>(len).expect("unexpected overflow");
-                        dealloc(ptr as *mut u8, layout);
+                        deallocate(ptr, len);
                     }
                 }
             }
@@ -852,7 +816,6 @@ impl<T> Drop for OptArrayIntoIter<T> {
         let not_finished = self.cursor < self.big_n;
         for level in 1..self.r {
             let block_len = fast_power(self.one_b, level as u32);
-            let layout = Layout::array::<T>(block_len).expect("unexpected overflow");
             let mut block = 0;
             while let Some(ptr) = self.big_a[level].pop_front() {
                 let unvisited = (level != first_level || block >= first_block)
@@ -889,7 +852,7 @@ impl<T> Drop for OptArrayIntoIter<T> {
                     }
                 }
                 unsafe {
-                    dealloc(ptr as *mut u8, layout);
+                    deallocate(ptr, block_len);
                 }
                 block += 1;
             }
@@ -1600,5 +1563,85 @@ mod tests {
             }
         }
         // implicitly drop()
+    }
+
+    /// Construct one array of each configuration under test.
+    fn zst_arrays<T>() -> Vec<OptimalArray<T>> {
+        vec![
+            OptimalArray::with_r(2),
+            OptimalArray::with_r(3),
+            OptimalArray::with_r(4),
+            OptimalArray::with_r(5),
+        ]
+    }
+
+    #[test]
+    fn test_general_array_zero_sized_unit() {
+        for mut sut in zst_arrays::<()>() {
+            // enough elements to force several rebuilds, combines, and splits
+            for _ in 0..10_000 {
+                sut.push(());
+            }
+            assert_eq!(sut.len(), 10_000);
+            assert!(sut.capacity() >= 10_000);
+            assert_eq!(sut.get(0), Some(&()));
+            assert_eq!(sut.get(9_999), Some(&()));
+            assert_eq!(sut.get(10_000), None);
+            assert_eq!(sut.iter().count(), 10_000);
+            assert_eq!(sut.swap_remove(1_234), ());
+            assert_eq!(sut.len(), 9_999);
+            while sut.pop().is_some() {}
+            assert!(sut.is_empty());
+            let sut: OptimalArray<()> = std::iter::repeat_n((), 500).collect();
+            assert_eq!(sut.into_iter().count(), 500);
+        }
+    }
+
+    #[test]
+    fn test_general_array_zero_sized_drop() {
+        use crate::zst::{Zst, drops};
+        for mut sut in zst_arrays::<Zst>() {
+            let start = drops();
+            for _ in 0..10_000 {
+                sut.push(Zst);
+            }
+            assert_eq!(drops(), start);
+            // pop half to exercise shrink and split
+            for _ in 0..5_000 {
+                assert!(sut.pop().is_some());
+            }
+            assert_eq!(drops(), start + 5_000);
+            drop(sut.swap_remove(0));
+            assert_eq!(drops(), start + 5_001);
+            sut.clear();
+            assert_eq!(drops(), start + 10_000);
+            assert!(sut.is_empty());
+
+            // reuse after clear, then drop the whole array
+            for _ in 0..1_000 {
+                sut.push(Zst);
+            }
+            drop(sut);
+            assert_eq!(drops(), start + 11_000);
+        }
+    }
+
+    #[test]
+    fn test_general_array_zero_sized_into_iter() {
+        use crate::zst::{Zst, drops};
+        for mut sut in zst_arrays::<Zst>() {
+            let start = drops();
+            for _ in 0..1_000 {
+                sut.push(Zst);
+            }
+            // partially consume the iterator, then drop the rest
+            let mut iter = sut.into_iter();
+            for _ in 0..300 {
+                assert!(iter.next().is_some());
+            }
+            assert_eq!(drops(), start + 300);
+            drop(iter);
+            assert_eq!(drops(), start + 1_000);
+        }
     }
 }

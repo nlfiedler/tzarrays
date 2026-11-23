@@ -255,6 +255,46 @@ fn test_simple_array() {
     }
 }
 
+/// Zero-sized element type that has drop glue.
+struct Unit;
+
+impl Drop for Unit {
+    fn drop(&mut self) {}
+}
+
+fn test_zero_sized() {
+    // zero-sized types must never reach the allocator
+    let mut sut = CyclicArray::<Unit>::new(10);
+    for _ in 0..7 {
+        sut.push_back(Unit);
+    }
+    drop(sut);
+
+    for r in 2..=5 {
+        let mut array: GeneralArray<Unit> = GeneralArray::with_r(r);
+        for _ in 0..10_000 {
+            array.push(Unit);
+        }
+        for _ in 0..5_000 {
+            array.pop();
+        }
+        let mut iter = array.into_iter();
+        iter.next();
+        drop(iter);
+    }
+
+    let mut array: SimpleArray<Unit> = SimpleArray::new();
+    for _ in 0..10_000 {
+        array.push(Unit);
+    }
+    for _ in 0..5_000 {
+        array.pop();
+    }
+    let mut iter = array.into_iter();
+    iter.next();
+    drop(iter);
+}
+
 //
 // Create and drop collections and iterators in order to test for memory leaks.
 // Must allocate Strings in order to fully test the drop implementation.
@@ -269,4 +309,7 @@ fn main() {
     println!("starting simple optimal array testing...");
     test_simple_array();
     println!("completed simple optimal array testing");
+    println!("starting zero-sized type testing...");
+    test_zero_sized();
+    println!("completed zero-sized type testing");
 }
