@@ -5,8 +5,9 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 This file follows the convention described at
 [Keep a Changelog](http://keepachangelog.com/en/1.0.0/).
 
-## Unreleased
+## [1.0.2] - 2026-11-22
 ### Fixed
+- Issue #1, memory leak when `r` equals `2`
 - Memory leak in simple implementation.
 - Memory leaks in general and simple `IntoIterator` implementations.
 - Undefined behavior when dropping a zero-capacity `CyclicArray`, which
