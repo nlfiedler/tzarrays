@@ -208,6 +208,17 @@ impl<T> OptimalArray<T> {
         }
         assert_eq!(remaining, 0);
 
+        // when shrinking, the last old block may have been only partially
+        // copied (e.g. r=2 rebuilding from B=8 to B=4 with 4 elements in a
+        // block of 8), in which case the loop above never deallocated it
+        if old_slot > 0 {
+            let old_block_len = fast_power(old_b, old_k as u32);
+            unsafe {
+                let ptr = self.big_a[old_k][old_block];
+                deallocate(ptr, old_block_len);
+            }
+        }
+
         // transition to the new array layout
         self.little_b = new_b;
         let br = new_b * self.r;
@@ -930,8 +941,8 @@ mod tests {
         for index in 0..1_000_000 {
             assert_eq!(sut[index], index);
         }
-        // TODO: leaks memory (64 bytes) for each pop cycle; it is a data block
-        // of 8 elements, likely when going from b=4 to b=3, or b=3 to b=2
+        // the rebuild from b=3 to b=2 used to leak the partially copied block
+        // of 8 elements (see issue #1)
         for value in (0..1_000_000).rev() {
             assert_eq!(sut.pop(), Some(value));
         }

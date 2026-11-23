@@ -5,7 +5,8 @@ FROM rustlang/rust:nightly
 
 RUN apt-get update && \
     apt-get -y install curl build-essential vim
-RUN rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
+# no --toolchain: install for the image's default (dated) nightly toolchain
+RUN rustup component add rust-src
 
 WORKDIR /leaker
 COPY Cargo.toml Cargo.toml
