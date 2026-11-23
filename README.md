@@ -59,7 +59,7 @@ If no problems were detected, a single line of output will appear. When done, cl
 
 ```shell
 exit
-docker compose down
+docker compose down --remove-orphans
 ```
 
 ## References
