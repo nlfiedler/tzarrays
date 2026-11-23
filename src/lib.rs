@@ -233,10 +233,13 @@ impl<T> Index<usize> for CyclicArray<T> {
 impl<T> Drop for CyclicArray<T> {
     fn drop(&mut self) {
         self.clear();
-        // apparently this has no effect if capacity is zero
-        let layout = Layout::array::<T>(self.capacity).expect("unexpected overflow");
-        unsafe {
-            dealloc(self.buffer as *mut u8, layout);
+        // new() does not allocate when capacity is zero, so there is nothing
+        // to free; passing a null pointer to dealloc() is undefined behavior
+        if !self.buffer.is_null() {
+            let layout = Layout::array::<T>(self.capacity).expect("unexpected overflow");
+            unsafe {
+                dealloc(self.buffer as *mut u8, layout);
+            }
         }
     }
 }
