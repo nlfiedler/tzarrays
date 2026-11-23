@@ -82,9 +82,10 @@ pub struct OptimalArray<T> {
     large: CyclicArray<*mut T>,
     /// the small blocks of size B
     small: CyclicArray<*mut T>,
-    /// number of empty B blocks, either 0 or 1; avoids deallocating a block and
-    /// then allocating another one of the same size for a pop followed by push
-    empty: usize,
+    /// an empty block of size B that is kept out of `small` so that a pop
+    /// followed by a push does not deallocate and then allocate the same
+    /// sized block; never counted in `n1`
+    spare: Option<*mut T>,
 }
 
 impl<T> OptimalArray<T> {
@@ -111,7 +112,7 @@ impl<T> OptimalArray<T> {
             n2: 0,
             large,
             small,
-            empty: 0,
+            spare: None,
         }
     }
 
@@ -210,9 +211,8 @@ impl<T> OptimalArray<T> {
             }
         }
 
-        if self.empty > 0 {
-            // an empty block remains at the end of level 1
-            let ptr = self.small.pop_back().unwrap();
+        if let Some(ptr) = self.spare.take() {
+            // the spare block is the wrong size for the new layout
             unsafe { deallocate(ptr, old_b) }
         }
 
@@ -231,7 +231,6 @@ impl<T> OptimalArray<T> {
         self.n2 = n2;
         self.large = large;
         self.small = small;
-        self.empty = 0;
     }
 
     /// Combine small blocks into larger blocks.
@@ -298,14 +297,11 @@ impl<T> OptimalArray<T> {
             // next condition to ensure we allocate another B block
         }
         if self.n1 == 0 || self.n0 == one_b {
-            if self.empty == 0 {
-                // A[1][n1] ← Allocate(B)
-                self.small.push_back(allocate::<T>(one_b));
-                // n1 ← n1 + 1
-                self.n1 += 1;
-            } else {
-                self.empty = 0;
-            }
+            // A[1][n1] ← Allocate(B), reusing the spare block if available
+            let ptr = self.spare.take().unwrap_or_else(|| allocate::<T>(one_b));
+            self.small.push_back(ptr);
+            // n1 ← n1 + 1
+            self.n1 += 1;
             // n0 ← 0
             self.n0 = 0;
         }
@@ -352,17 +348,15 @@ impl<T> OptimalArray<T> {
 
         if self.n0 == 0 {
             let one_b: usize = 1 << self.little_b;
-            // if there is another empty data block, deallocate it
-            if self.empty == 1 {
-                // Deallocate(A[1][n1-1])
-                let ptr = self.small.pop_back().unwrap();
-                unsafe { deallocate(ptr, one_b) }
-                // n1 ← n1 - 1
-                self.n1 -= 1;
+            // Deallocate(A[1][n1-1]) -- or rather, keep this now empty block as
+            // the spare in case more pushes occur and we would soon be
+            // allocating the same sized block again; at most one spare is kept
+            let ptr = self.small.pop_back().unwrap();
+            if let Some(old_spare) = self.spare.replace(ptr) {
+                unsafe { deallocate(old_spare, one_b) }
             }
-            // leave this last empty data block in case more pushes occur and we
-            // would soon be allocating the same sized block again
-            self.empty = 1;
+            // n1 ← n1 - 1
+            self.n1 -= 1;
             // n0 ← B -- another mistake in the paper?
             if self.n1 > 0 {
                 self.n0 = one_b;
@@ -419,13 +413,8 @@ impl<T> OptimalArray<T> {
     /// Constant time.
     pub fn capacity(&self) -> usize {
         let one_b: usize = 1 << self.little_b;
-        if self.n1 > 0 || self.n2 > 0 {
-            one_b * one_b * self.n2 + one_b * self.n1
-        } else if self.empty > 0 {
-            one_b * self.empty
-        } else {
-            0
-        }
+        let spare = if self.spare.is_some() { one_b } else { 0 };
+        one_b * one_b * self.n2 + one_b * self.n1 + spare
     }
 
     /// Returns true if the array has a length of 0.
@@ -553,6 +542,10 @@ impl<T> OptimalArray<T> {
     pub fn clear(&mut self) {
         let one_b: usize = 1 << self.little_b;
 
+        if let Some(ptr) = self.spare.take() {
+            unsafe { deallocate(ptr, one_b) }
+        }
+
         if self.big_n > 0 && std::mem::needs_drop::<T>() {
             // drop items and deallocate the data blocks
 
@@ -580,8 +573,7 @@ impl<T> OptimalArray<T> {
             }
         } else {
             // If elements do not need dropping, then simply deallocate the data
-            // blocks. Note that even an "empty" array may still have an empty
-            // data block lingering that needs to be freed.
+            // blocks.
             for level in [BlockSize::Large, BlockSize::Small].iter() {
                 let (block_index, block_len) = match level {
                     BlockSize::Small => (&mut self.small, one_b),
@@ -597,7 +589,6 @@ impl<T> OptimalArray<T> {
 
         // zero out everything to the initial state
         self.big_n = 0;
-        self.empty = 0;
         self.little_b = 2;
         self.upper_limit = 64;
         self.lower_limit = 0;
@@ -622,7 +613,7 @@ impl<T> fmt::Display for OptimalArray<T> {
             self.lower_limit,
             self.upper_limit,
             self.little_b,
-            self.empty,
+            self.spare.is_some() as usize,
             self.n0,
             self.n1,
             self.n2
@@ -691,6 +682,9 @@ impl<T> IntoIterator for OptimalArray<T> {
         let small = std::mem::take(&mut me.small);
         let large = std::mem::take(&mut me.large);
         let small_size: usize = 1 << me.little_b;
+        if let Some(ptr) = me.spare.take() {
+            unsafe { deallocate(ptr, small_size) }
+        }
         let large_size: usize = small_size * small_size;
         let last_large = large_size * me.n2;
         OptArrayIntoIter {
@@ -760,60 +754,30 @@ impl<T> Iterator for OptArrayIntoIter<T> {
 
 impl<T> Drop for OptArrayIntoIter<T> {
     fn drop(&mut self) {
-        // all visited elements have already been dropped, so carefully examine
-        // all of the blocks and determine which ones have unvisited elements
-        let (first_level, first_block, first_slot) = self.locate(self.cursor);
-        let (last_level, last_block, last_slot) = if self.big_n == 0 {
-            (BlockSize::Small, 0, 0)
-        } else {
-            self.locate(self.big_n - 1)
-        };
-        let not_finished = self.cursor < self.big_n;
-        let levels = [
-            (BlockSize::Large, &mut self.large, self.large_size),
-            (BlockSize::Small, &mut self.small, self.small_size),
-        ];
-        for (level, block_index, block_len) in levels.into_iter() {
-            let mut block = 0;
-            while let Some(ptr) = block_index.pop_front() {
-                let unvisited = (level != first_level || block >= first_block)
-                    && (level != last_level || block < last_block);
-                let is_first = level == first_level && block == first_block;
-                let is_last = level == last_level && block == last_block;
-                if is_first && is_last {
-                    // special-case for first block being the last block
-                    if first_slot <= last_slot {
-                        unsafe {
-                            drop_in_place(slice_from_raw_parts_mut(
-                                ptr.add(first_slot),
-                                last_slot - first_slot + 1,
-                            ));
-                        }
-                    }
-                } else if is_first {
-                    // special-case for partially visited first block
-                    unsafe {
-                        drop_in_place(slice_from_raw_parts_mut(
-                            ptr.add(first_slot),
-                            block_len - first_slot,
-                        ));
-                    }
-                } else if is_last && not_finished {
-                    // special-case for maybe partially filled last block
-                    unsafe {
-                        drop_in_place(slice_from_raw_parts_mut(ptr, last_slot + 1));
-                    }
-                } else if unvisited {
-                    // all other unvisited blocks are dropped in their entirety
-                    unsafe {
-                        drop_in_place(slice_from_raw_parts_mut(ptr, block_len));
-                    }
-                }
+        // drop the elements that were never visited, a block-sized run at a
+        // time; everything before the cursor has already been moved out
+        if std::mem::needs_drop::<T>() {
+            while self.cursor < self.big_n {
+                let (level, block, slot) = self.locate(self.cursor);
+                let (block_index, block_len) = match level {
+                    BlockSize::Small => (&self.small, self.small_size),
+                    BlockSize::Large => (&self.large, self.large_size),
+                };
+                let count = (block_len - slot).min(self.big_n - self.cursor);
                 unsafe {
-                    deallocate(ptr, block_len);
+                    let ptr = block_index[block].add(slot);
+                    drop_in_place(slice_from_raw_parts_mut(ptr, count));
                 }
-                block += 1;
+                self.cursor += count;
             }
+        }
+
+        // deallocate all of the data blocks
+        while let Some(ptr) = self.large.pop_front() {
+            unsafe { deallocate(ptr, self.large_size) }
+        }
+        while let Some(ptr) = self.small.pop_front() {
+            unsafe { deallocate(ptr, self.small_size) }
         }
 
         // zero out everything to the initial state
@@ -1381,6 +1345,83 @@ mod tests {
             assert_eq!(drops(), start + 300);
             drop(iter);
             assert_eq!(drops(), start + 1_000);
+        }
+    }
+
+    #[test]
+    fn test_simple_array_zero_sized_drop() {
+        use crate::zst::{Zst, drops};
+        for mut sut in zst_arrays::<Zst>() {
+            let start = drops();
+            for _ in 0..10_000 {
+                sut.push(Zst);
+            }
+            assert_eq!(drops(), start);
+            // pop half to exercise shrink and split
+            for _ in 0..5_000 {
+                assert!(sut.pop().is_some());
+            }
+            assert_eq!(drops(), start + 5_000);
+            drop(sut.swap_remove(0));
+            assert_eq!(drops(), start + 5_001);
+            sut.clear();
+            assert_eq!(drops(), start + 10_000);
+            assert!(sut.is_empty());
+
+            // reuse after clear, then drop the whole array
+            for _ in 0..1_000 {
+                sut.push(Zst);
+            }
+            drop(sut);
+            assert_eq!(drops(), start + 11_000);
+        }
+    }
+
+    #[test]
+    fn test_simple_array_random_ops_match_vec() {
+        // drive random push/pop/swap_remove/clear sequences, with varying
+        // bias toward growing or shrinking, and compare against Vec
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move || {
+            // xorshift64
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as usize
+        };
+        for round in 0..200 {
+            let mut sut: OptimalArray<String> = OptimalArray::new();
+            let mut model: Vec<String> = Vec::new();
+            let push_bias = 45 + (round % 3) * 10;
+            for step in 0..2_000 {
+                let op = next() % 100;
+                if op < push_bias {
+                    let value = format!("{round}-{step}");
+                    sut.push(value.clone());
+                    model.push(value);
+                } else if op < 97 {
+                    assert_eq!(sut.pop(), model.pop(), "round {round} step {step}");
+                } else if op < 99 {
+                    if !model.is_empty() {
+                        let index = next() % model.len();
+                        assert_eq!(sut.swap_remove(index), model.swap_remove(index));
+                    }
+                } else {
+                    sut.clear();
+                    model.clear();
+                }
+                assert_eq!(sut.len(), model.len());
+                assert!(sut.capacity() >= sut.len());
+            }
+            assert!(sut.iter().eq(model.iter()));
+            // consume some or all of the elements by value, then drop the
+            // iterator to release the rest
+            let take = next() % (model.len() + 1);
+            let mut iter = sut.into_iter();
+            for expected in model.into_iter().take(take) {
+                assert_eq!(iter.next(), Some(expected));
+            }
+            drop(iter);
         }
     }
 }

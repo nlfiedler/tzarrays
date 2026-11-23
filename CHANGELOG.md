@@ -9,6 +9,14 @@ This file follows the convention described at
 ### Fixed
 - Memory leak in simple implementation.
 - Memory leaks in general and simple `IntoIterator` implementations.
+- Undefined behavior when dropping a zero-capacity `CyclicArray`, which
+  aborts the tests on recent Rust releases.
+- Undefined behavior from zero-sized allocations when the element type is a
+  zero-sized type.
+- Simple array could write pushed values into the wrong block, and `clear()`
+  could drop uninitialized slots, after popping had emptied a block.
+- Double drop of already-yielded elements when dropping an `IntoIterator` of
+  either array that had moved past the larger blocks.
 
 ## [1.0.1] - 2025-09-24
 ### Changed

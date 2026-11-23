@@ -805,56 +805,26 @@ impl<T> Iterator for OptArrayIntoIter<T> {
 
 impl<T> Drop for OptArrayIntoIter<T> {
     fn drop(&mut self) {
-        // all visited elements have already been dropped, so carefully examine
-        // all of the blocks and determine which ones have unvisited elements
-        let (first_level, first_block, first_slot) = self.locate(self.cursor);
-        let (last_level, last_block, last_slot) = if self.big_n == 0 {
-            self.locate(0)
-        } else {
-            self.locate(self.big_n - 1)
-        };
-        let not_finished = self.cursor < self.big_n;
+        // drop the elements that were never visited, a block-sized run at a
+        // time; everything before the cursor has already been moved out
+        if std::mem::needs_drop::<T>() {
+            while self.cursor < self.big_n {
+                let (level, block, slot) = self.locate(self.cursor);
+                let block_len = fast_power(self.one_b, level as u32);
+                let count = (block_len - slot).min(self.big_n - self.cursor);
+                unsafe {
+                    let ptr = self.big_a[level][block].add(slot);
+                    drop_in_place(slice_from_raw_parts_mut(ptr, count));
+                }
+                self.cursor += count;
+            }
+        }
+
+        // deallocate all of the data blocks
         for level in 1..self.r {
             let block_len = fast_power(self.one_b, level as u32);
-            let mut block = 0;
             while let Some(ptr) = self.big_a[level].pop_front() {
-                let unvisited = (level != first_level || block >= first_block)
-                    && (level != last_level || block < last_block);
-                let is_first = level == first_level && block == first_block;
-                let is_last = level == last_level && block == last_block;
-                if is_first && is_last {
-                    // special-case for first block being the last block
-                    if first_slot <= last_slot {
-                        unsafe {
-                            drop_in_place(slice_from_raw_parts_mut(
-                                ptr.add(first_slot),
-                                last_slot - first_slot + 1,
-                            ));
-                        }
-                    }
-                } else if is_first {
-                    // special-case for partially visited first block
-                    unsafe {
-                        drop_in_place(slice_from_raw_parts_mut(
-                            ptr.add(first_slot),
-                            block_len - first_slot,
-                        ));
-                    }
-                } else if is_last && not_finished {
-                    // special-case for maybe partially filled last block
-                    unsafe {
-                        drop_in_place(slice_from_raw_parts_mut(ptr, last_slot + 1));
-                    }
-                } else if unvisited {
-                    // all other unvisited blocks are dropped in their entirety
-                    unsafe {
-                        drop_in_place(slice_from_raw_parts_mut(ptr, block_len));
-                    }
-                }
-                unsafe {
-                    deallocate(ptr, block_len);
-                }
-                block += 1;
+                unsafe { deallocate(ptr, block_len) }
             }
         }
 
@@ -1642,6 +1612,54 @@ mod tests {
             assert_eq!(drops(), start + 300);
             drop(iter);
             assert_eq!(drops(), start + 1_000);
+        }
+    }
+
+    #[test]
+    fn test_general_array_random_ops_match_vec() {
+        // drive random push/pop/swap_remove/clear sequences, with varying
+        // bias toward growing or shrinking, and compare against Vec
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move || {
+            // xorshift64
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as usize
+        };
+        for round in 0..200 {
+            let mut sut: OptimalArray<String> = OptimalArray::with_r(2 + round % 4);
+            let mut model: Vec<String> = Vec::new();
+            let push_bias = 45 + (round % 3) * 10;
+            for step in 0..2_000 {
+                let op = next() % 100;
+                if op < push_bias {
+                    let value = format!("{round}-{step}");
+                    sut.push(value.clone());
+                    model.push(value);
+                } else if op < 97 {
+                    assert_eq!(sut.pop(), model.pop(), "round {round} step {step}");
+                } else if op < 99 {
+                    if !model.is_empty() {
+                        let index = next() % model.len();
+                        assert_eq!(sut.swap_remove(index), model.swap_remove(index));
+                    }
+                } else {
+                    sut.clear();
+                    model.clear();
+                }
+                assert_eq!(sut.len(), model.len());
+                assert!(sut.capacity() >= sut.len());
+            }
+            assert!(sut.iter().eq(model.iter()));
+            // consume some or all of the elements by value, then drop the
+            // iterator to release the rest
+            let take = next() % (model.len() + 1);
+            let mut iter = sut.into_iter();
+            for expected in model.into_iter().take(take) {
+                assert_eq!(iter.next(), Some(expected));
+            }
+            drop(iter);
         }
     }
 }
